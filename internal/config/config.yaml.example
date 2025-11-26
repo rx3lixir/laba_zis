@@ -1,0 +1,19 @@
+general_params:
+  env: dev
+  secret_key: 36080001349340267925113477454910
+http_server_params:
+  http_server_address: localhost
+  http_server_port: 8080
+main_db_params:
+  db_username: db_username 
+  db_password: db_password 
+  db_name: db_name 
+  db_port: 5432 
+  db_host: db_host
+  db_timeout: 5 
+s3_params:
+  endpoint: localhost:9000
+  access_key_id: some_key 
+  secret_access_key: 12345678
+  use_ssl: false
+  bucket_name: bucket_name 
