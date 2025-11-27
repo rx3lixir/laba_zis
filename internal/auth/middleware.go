@@ -2,11 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/rx3lixir/laba_zis/internal/server"
 )
 
 type contextKey string
@@ -22,19 +22,28 @@ func Middleware(authService *Service) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				server.RespondError(w, http.StatusUnauthorized, "authorization required")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Authorization token is required"})
+
 				return
 			}
 
 			parts := strings.Split(authHeader, " ")
 			if len(parts) != 2 || parts[0] != "Bearer" {
-				server.RespondError(w, http.StatusUnauthorized, "invalid authorization format")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid authorization token format"})
+
 				return
 			}
 
 			claims, err := authService.ValidateAccessToken(parts[1])
 			if err != nil {
-				server.RespondError(w, http.StatusUnauthorized, "invalid token")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid authorization token"})
+
 				return
 			}
 

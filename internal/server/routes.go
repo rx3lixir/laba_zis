@@ -24,20 +24,14 @@ func NewRouter(config RouterConfig) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
 
-	// Public routes
+	// Routes
 	r.Route("/api", func(r chi.Router) {
-		// Auth routes (no middleware)
 		r.Route("/auth", func(r chi.Router) {
-			r.Post("/signup", config.UserHandler.HandleSignup)
-			r.Post("/signin", config.UserHandler.HandleSignin)
-			r.Post("/refresh", config.UserHandler.HandleRefreshToken)
+			config.UserHandler.RegisterUserRoutes(r)
 		})
-
-		// Protected routes
 		r.Route("/user", func(r chi.Router) {
 			r.Use(auth.Middleware(config.AuthService))
-
-			config.UserHandler.RegisterRoutes(r)
+			config.UserHandler.RegisterUserRoutes(r)
 		})
 	})
 

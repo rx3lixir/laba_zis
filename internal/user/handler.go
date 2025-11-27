@@ -11,7 +11,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
-	"github.com/rx3lixir/laba_zis/internal/server"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 	"github.com/rx3lixir/laba_zis/pkg/password"
 )
@@ -30,17 +29,26 @@ func NewHandler(store Store, authService *auth.Service, log logger.Logger) *Hand
 	}
 }
 
-func (h *Handler) RegisterRoutes(r chi.Router) {
+func (h *Handler) RegisterUserRoutes(r chi.Router) {
 	r.Get("/", h.HandleGetAllUsers)
 	r.Get("/{id}", h.HandleGetUserByID)
-	r.Get("/{email}", h.HandleGetUserByEmail)
+	r.Get("/email/{email}", h.HandleGetUserByEmail)
 	r.Delete("/", h.HandleDeleteUser)
+}
+
+func (h *Handler) RegisterAuthRoutes(r chi.Router) {
+	r.Post("/signup", h.HandleSignup)
+	r.Post("/signin", h.HandleSignin)
+	r.Post("/refresh", h.HandleRefreshToken)
 }
 
 func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	req := new(CreateUserRequest)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		server.RespondError(w, http.StatusBadRequest, "Invalid JSON")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+
 		return
 	}
 
@@ -51,18 +59,27 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err := validateCreateUserRequest(req); err != nil {
-		server.RespondError(w, http.StatusInternalServerError, "Failed to validate user")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to validate user"})
+
 		h.log.Error(
 			"User validation failed",
 			"user_email", req.Email,
 			"error", err,
 		)
+
+		return
 	}
 
 	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to proccess password"})
+
 		h.log.Error("Failed to hash passowrd", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to proccess password")
+
 		return
 	}
 
@@ -76,8 +93,12 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := h.store.CreateUser(ctx, newUser); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create user"})
+
 		h.log.Error("Failed to create user", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to create user")
+
 		return
 	}
 
@@ -94,20 +115,28 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"user_id", newUser.ID,
 	)
 
-	server.RespondJSON(w, http.StatusCreated, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Handles getting user using it's ID
 func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		server.RespondError(w, http.StatusBadRequest, "User ID is required")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User ID required"})
+
 		return
 	}
 
 	userID, err := uuid.Parse(id)
 	if err != nil {
-		server.RespondError(w, http.StatusBadRequest, "Invalid user ID format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user ID format"})
+
 		return
 	}
 
@@ -122,7 +151,10 @@ func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
-		server.RespondError(w, http.StatusInternalServerError, "Failed to retrieve user")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve user"})
+
 		return
 	}
 
@@ -140,7 +172,9 @@ func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
 		"user_id", user.ID,
 	)
 
-	server.RespondJSON(w, http.StatusOK, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Handles getting all users from database
@@ -172,6 +206,12 @@ func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) {
 
 	users, err := h.store.GetAllUsers(ctx, limit, offset)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve users"})
+
+		h.log.Error("Failed to retrieve users", "error", err)
+
 		return
 	}
 
@@ -206,14 +246,19 @@ func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) {
 		len(users),
 	)
 
-	server.RespondJSON(w, http.StatusOK, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Handles getting user by it's email
 func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) {
 	email := chi.URLParam(r, "email")
 	if email == "" {
-		server.RespondError(w, http.StatusBadRequest, "Email is required")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User email is required"})
+
 		return
 	}
 
@@ -228,7 +273,10 @@ func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.store.GetUserByEmail(ctx, email)
 	if err != nil {
-		server.RespondError(w, http.StatusInternalServerError, "Failed to get user")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Falied to retrieve user"})
+
 		return
 	}
 
@@ -246,20 +294,28 @@ func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 	}
 
-	server.RespondJSON(w, http.StatusOK, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // Handles deleting user from database
 func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
-		server.RespondError(w, http.StatusBadRequest, "User ID is required")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User ID is required"})
+
 		return
 	}
 
 	userID, err := uuid.Parse(id)
 	if err != nil {
-		server.RespondError(w, http.StatusBadRequest, "Invalid user ID format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid User ID format"})
+
 		return
 	}
 
@@ -273,7 +329,10 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := h.store.DeleteUser(ctx, userID); err != nil {
-		server.RespondError(w, http.StatusInternalServerError, "Failed to delete user")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete user"})
+
 		return
 	}
 
@@ -288,14 +347,19 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		userID,
 	)
 
-	server.RespondJSON(w, http.StatusOK, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // HandleSignup registers a new user and returns JWT tokens
 func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
 	req := new(SignupRequest)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		server.RespondError(w, http.StatusBadRequest, "Invalid JSON format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+
 		return
 	}
 
@@ -313,25 +377,36 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		server.RespondError(w, http.StatusInternalServerError, "Failed to validate request")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to validate request"})
+
 		h.log.Error(
 			"Signup validation failed",
 			"email", req.Email,
 			"error", err,
 		)
+
 		return
 	}
 
 	userExist, _ := h.store.GetUserByEmail(r.Context(), strings.ToLower(strings.TrimSpace(req.Email)))
 	if userExist != nil {
-		server.RespondError(w, http.StatusConflict, "User with this email already exists")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User with this email is already exists"})
+
 		return
 	}
 
 	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to process password"})
+
 		h.log.Error("Failed to hash password", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to process password")
+
 		return
 	}
 
@@ -345,22 +420,34 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := h.store.CreateUser(ctx, newUser); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create user"})
+
 		h.log.Error("Failed to create user", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to create user")
+
 		return
 	}
 
 	accessToken, err := h.authService.GenerateAccessToken(newUser.ID, newUser.Email, newUser.Username)
 	if err != nil {
-		h.log.Error("Failed to generate access token", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to generate pair of tokens")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
+
+		h.log.Error("Failed to generate tokens", "error", err)
+
 		return
 	}
 
 	refreshToken, err := h.authService.GenerateRefreshToken(newUser.ID)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
+
 		h.log.Error("Failed to generate refresh token", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to generate tokens")
+
 		return
 	}
 
@@ -383,14 +470,19 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		"email", newUser.Email,
 	)
 
-	server.RespondJSON(w, http.StatusCreated, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // HandleSignin authenticates a user and returns JWT pair of tokens
 func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
 	req := new(SigninRequest)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		server.RespondError(w, http.StatusBadRequest, "Invalid JSON format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+
 		return
 	}
 
@@ -401,11 +493,17 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if req.Email == "" {
-		server.RespondError(w, http.StatusBadRequest, "Email is required")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Email is required"})
+
 		return
 	}
 	if req.Password == "" {
-		server.RespondError(w, http.StatusBadRequest, "Password is required")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Passowrd is required"})
+
 		return
 	}
 
@@ -414,28 +512,44 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.store.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(req.Email)))
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User does not exists"})
+
 		h.log.Warn("Signin failed - user not found", "email", req.Email)
-		server.RespondError(w, http.StatusUnauthorized, "Invalid email or password")
+
 		return
 	}
 
 	if !password.Verify(req.Password, user.Password) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Email or passowrd is invalid"})
+
 		h.log.Warn("Signin failed - password is invalid", "email", req.Email)
-		server.RespondError(w, http.StatusUnauthorized, "Invalid email or password")
+
 		return
 	}
 
 	accessToken, err := h.authService.GenerateAccessToken(user.ID, user.Email, user.Username)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
+
 		h.log.Error("Failed to generate access token", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to generate tokens")
+
 		return
 	}
 
 	refreshToken, err := h.authService.GenerateRefreshToken(user.ID)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
+
 		h.log.Error("Failed to generate refresh token", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to generate tokens")
+
 		return
 	}
 
@@ -458,14 +572,19 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
 		"email", user.Email,
 	)
 
-	server.RespondJSON(w, http.StatusOK, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
 
 // HandleRefreshToken generates new tokens using a refresh token
 func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 	req := new(RefreshTokenRequest)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		server.RespondError(w, http.StatusBadRequest, "Invalid JSON format")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+
 		return
 	}
 
@@ -475,14 +594,21 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if req.RefreshToken == "" {
-		server.RespondError(w, http.StatusBadRequest, "Refresh token is required")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Refresh token is required"})
+
 		return
 	}
 
 	userID, err := h.authService.ValidateRefreshToken(req.RefreshToken)
 	if err != nil {
-		h.log.Warn("Invalid refresh token", "error", err)
-		server.RespondError(w, http.StatusUnauthorized, "Invalid or expired refresh token")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or expired refresh token"})
+
+		h.log.Debug("Invalid or expired refresh token", "error", err)
+
 		return
 	}
 
@@ -491,22 +617,34 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+
 		h.log.Error("Failed to get user during token refresh operation", "user_id", userID, "error", err)
-		server.RespondError(w, http.StatusUnauthorized, "User not found")
+
 		return
 	}
 
 	newAccessToken, err := h.authService.GenerateAccessToken(userID, user.Email, user.Username)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
+
 		h.log.Error("Failed to generate new access token", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to generate tokens")
+
 		return
 	}
 
 	newRefreshToken, err := h.authService.GenerateRefreshToken(userID)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
+
 		h.log.Error("Failed to generate new refresh token", "error", err)
-		server.RespondError(w, http.StatusInternalServerError, "Failed to generate tokens")
+
 		return
 	}
 
@@ -521,5 +659,7 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		"user_id", user.ID,
 	)
 
-	server.RespondJSON(w, http.StatusOK, response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }
