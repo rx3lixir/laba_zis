@@ -27,4 +27,4 @@ go.work.sum
 internal/config/config.yaml
 
 # makefile
-./Makefile
+Makefile
