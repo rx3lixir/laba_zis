@@ -1,62 +1,65 @@
 package logger
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
-	"strings"
+	"time"
 )
 
+// Config defines the logger configuration
 type Config struct {
-	Env        string
-	JSONOutput bool
-	AddSource  bool
+	Env              string
+	Level            string
+	AddSource        bool
+	SourcePathLength int
+	TimeFormat       string
+	Output           io.Writer
 }
 
-// Logger is a wrapper around slog.Logger with additional methods
+// Logger wraps slog.Logger with additional convenience methods
 type Logger struct {
 	*slog.Logger
 }
 
+// New creates a new configured logger instance
 func New(config Config) (*Logger, error) {
-	level := parseLogLevel(config.Env)
-
-	handlerOpts := &slog.HandlerOptions{
-		Level:     level,
-		AddSource: config.AddSource,
+	if config.Output == nil {
+		config.Output = os.Stdout
+	}
+	if config.TimeFormat == "" {
+		config.TimeFormat = time.RFC3339
+	}
+	if config.Env == "" {
+		config.Env = "dev"
 	}
 
-	handler, err := determineHandler(config.Env, handlerOpts)
+	handler, err := createHandler(config)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to determine handler %d", err)
+		return nil, fmt.Errorf("failed to create handler: %w", err)
 	}
 
 	logger := slog.New(handler)
+
 	slog.SetDefault(logger)
 
-	return &Logger{
-		Logger: logger,
-	}, nil
+	return &Logger{Logger: logger}, nil
 }
 
-func determineHandler(env string, opts *slog.HandlerOptions) (slog.Handler, error) {
-	switch strings.ToLower(env) {
-	case "prod":
-		return slog.NewJSONHandler(os.Stdout, opts), nil
-	case "dev":
-		return slog.NewTextHandler(os.Stdout, opts), nil
-	default:
-		return nil, fmt.Errorf("lox")
-	}
+// WithContext adds context-aware logging (placeholder for future context extraction)
+func (l *Logger) WithContext(ctx context.Context) *Logger {
+	// You could extract trace IDs, request IDs, etc. from context here
+	return &Logger{l.Logger.With()}
 }
 
-func parseLogLevel(env string) slog.Level {
-	switch strings.ToLower(env) {
-	case "dev":
-		return slog.LevelDebug
-	case "prod":
-		return slog.LevelWarn
-	default:
-		return slog.LevelInfo
+// WithFields creates a logger with pre-populated fields
+// Useful for request IDs, user IDs, service names, etc.
+func (l *Logger) WithFields(fields map[string]any) *Logger {
+	args := make([]any, 0, len(fields)*2)
+	for k, v := range fields {
+		args = append(args, k, v)
 	}
+	return &Logger{Logger: l.Logger.With(args...)}
 }

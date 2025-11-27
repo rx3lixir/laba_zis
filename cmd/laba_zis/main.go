@@ -8,46 +8,45 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/internal/config"
-	httpserver "github.com/rx3lixir/laba_zis/internal/http_server"
-	maindb "github.com/rx3lixir/laba_zis/internal/storage/main_db"
-	"github.com/rx3lixir/laba_zis/pkg/jwt"
+	"github.com/rx3lixir/laba_zis/internal/server"
+	"github.com/rx3lixir/laba_zis/internal/storage/postgres"
+	"github.com/rx3lixir/laba_zis/internal/user"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 func main() {
-	// Initializing and validating config
-	cm, err := config.NewConfigManager("internal/config/config.yaml")
-	if err != nil {
-		fmt.Printf("Error getting config file: %d", err)
-		os.Exit(1)
-	}
-	c := cm.GetConfig()
-	if err := c.Validate(); err != nil {
-		fmt.Printf("Invalid configuration: %d", err)
-		os.Exit(1)
-	}
-
-	// Initializing logger
-	log, err := logger.New(logger.Config{
-		Env:       c.GeneralParams.Env,
-		AddSource: false,
-	})
-
-	log.Info(
-		"Config loaded successfully!",
-		"env", c.GeneralParams.Env,
-		"http_server_port", c.HttpServerParams.Port,
-		"http_server_addresss", c.HttpServerParams.Address,
-		"database", c.MainDBParams.Name,
-	)
-
-	// Global context with cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Creating database connection and init Postgres
-	pool, err := maindb.CreatePostgresPool(ctx, c.MainDBParams.GetDSN())
+	cm, err := config.NewConfigManager("internal/config/config.yaml")
+	if err != nil {
+		fmt.Errorf("Error getting config file: %w", err)
+		os.Exit(1)
+	}
+
+	c := cm.GetConfig()
+
+	if err := c.Validate(); err != nil {
+		fmt.Errorf("Invalid configuration: %w", err)
+		os.Exit(1)
+	}
+
+	log := logger.Must(logger.New(logger.Config{
+		Env:              c.GeneralParams.Env,
+		AddSource:        true,
+		SourcePathLength: 0,
+	}))
+
+	log.Info(
+		"Configuration loaded",
+		"env", c.GeneralParams.Env,
+		"http_server_address", c.HttpServerParams.GetAddress(),
+		"database", c.MainDBParams.Name,
+	)
+
+	pool, err := postgres.NewPool(ctx, c.MainDBParams.GetDSN())
 	if err != nil {
 		log.Error(
 			"Failed to create postgres pool",
@@ -63,47 +62,54 @@ func main() {
 		"db", c.MainDBParams.GetDSN(),
 	)
 
-	maindbStore := maindb.NewPostgresStore(pool)
+	// Create stores
+	userStore := user.NewPostgresStore(pool)
 
-	// JWT Service intialization
-	jwtService := jwt.NewService(
+	// Create auth service
+	authService := auth.NewService(
 		c.GeneralParams.SecretKey,
-		time.Minute*15,
-		time.Hour*24*7,
+		15*time.Minute, // access token
+		7*24*time.Hour, // refresh token
 	)
 
-	// Creates HTTP server
-	HTTPserver := httpserver.New(
-		c.HttpServerParams.GetAddress(),
-		maindbStore,
-		jwtService,
-		log,
-	)
+	// Create Handlers
+	userHandler := user.NewHandler(userStore, authService, *log)
 
+	// Setup router
+	router := server.NewRouter(server.RouterConfig{
+		UserHandler: userHandler,
+		AuthService: authService,
+		Log:         *log,
+	})
+
+	srv := server.New(c.HttpServerParams.GetAddress(), router, *log)
+
+	// Start server
 	serverErrors := make(chan error, 1)
-
 	go func() {
-		serverErrors <- HTTPserver.Start()
+		serverErrors <- srv.Start()
 	}()
 
+	// Wait for shutdown signal
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
 
-	// Block until we recieve a signal or error
 	select {
 	case err := <-serverErrors:
-		log.Error("Server error", "error", err)
+		log.Error("server error", "error", err)
 		os.Exit(1)
 
 	case sig := <-shutdown:
-		log.Info("Shutdown signal received", "signal", sig)
+		log.Info("shutdown signal received", "signal", sig)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		log.Info("Shutting down HTTP server...")
-		if err := HTTPserver.Shutdown(ctx); err != nil {
-			log.Error("Graceful shutdown failed", "error", err)
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Error("graceful shutdown failed", "error", err)
+			os.Exit(1)
 		}
+
+		log.Info("server stopped")
 	}
 }
