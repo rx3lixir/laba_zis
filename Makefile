@@ -14,7 +14,7 @@ MIGRATIONS_DBNAME=laba_main_db
 MIGRATIONS_DRIVER=postgres
 
 # Path where migrations lay
-MIGRATIONS_PATH=internal/storage/main_db/migrations
+MIGRATIONS_PATH=internal/storage/postgres/migrations
 
 # Auto-load .env file if it exists
 ifneq (,$(wildcard .env))

@@ -27,7 +27,7 @@ func NewRouter(config RouterConfig) *chi.Mux {
 	// Routes
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
-			config.UserHandler.RegisterUserRoutes(r)
+			config.UserHandler.RegisterAuthRoutes(r)
 		})
 		r.Route("/user", func(r chi.Router) {
 			r.Use(auth.Middleware(config.AuthService))

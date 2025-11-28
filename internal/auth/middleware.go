@@ -23,7 +23,7 @@ func Middleware(authService *Service) func(http.Handler) http.Handler {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
+				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]string{"error": "Authorization token is required"})
 
 				return
@@ -32,7 +32,7 @@ func Middleware(authService *Service) func(http.Handler) http.Handler {
 			parts := strings.Split(authHeader, " ")
 			if len(parts) != 2 || parts[0] != "Bearer" {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
+				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid authorization token format"})
 
 				return
@@ -41,7 +41,7 @@ func Middleware(authService *Service) func(http.Handler) http.Handler {
 			claims, err := authService.ValidateAccessToken(parts[1])
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
+				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid authorization token"})
 
 				return

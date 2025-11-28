@@ -22,14 +22,14 @@ func main() {
 
 	cm, err := config.NewConfigManager("internal/config/config.yaml")
 	if err != nil {
-		fmt.Printf("Error getting config file: %d", err)
+		fmt.Printf("Error getting config file: %v", err)
 		os.Exit(1)
 	}
 
 	c := cm.GetConfig()
 
 	if err := c.Validate(); err != nil {
-		fmt.Printf("Invalid configuration: %d", err)
+		fmt.Printf("Invalid configuration: %v", err)
 		os.Exit(1)
 	}
 

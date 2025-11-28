@@ -33,7 +33,7 @@ func (h *Handler) RegisterUserRoutes(r chi.Router) {
 	r.Get("/", h.HandleGetAllUsers)
 	r.Get("/{id}", h.HandleGetUserByID)
 	r.Get("/email/{email}", h.HandleGetUserByEmail)
-	r.Delete("/", h.HandleDeleteUser)
+	r.Delete("/{id}", h.HandleDeleteUser)
 }
 
 func (h *Handler) RegisterAuthRoutes(r chi.Router) {
@@ -523,7 +523,7 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
 
 	if !password.Verify(req.Password, user.Password) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Email or passowrd is invalid"})
 
 		h.log.Warn("Signin failed - password is invalid", "email", req.Email)
