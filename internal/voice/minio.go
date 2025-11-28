@@ -1,4 +1,4 @@
-package rooms
+package voice
 
 import (
 	"bytes"
@@ -11,16 +11,20 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
-type MinIOStore struct {
+type MinIOVoiceStore struct {
 	client     *minio.Client
 	bucketName string
 }
 
-func NewMinIOStore(client *minio.Client, bucketName string) *MinIOStore {
-	return &MinIOStore{client: client, bucketName: bucketName}
+func NewMinIOVoiceStore(client *minio.Client, bucketName string) *MinIOVoiceStore {
+	return &MinIOVoiceStore{
+		client:     client,
+		bucketName: bucketName,
+	}
 }
 
-func (m *MinIOStore) UploadVoiceMessage(
+// UploadVoiceMessage uplads a voice message to MinIO
+func (m *MinIOVoiceStore) UploadVoiceMessage(
 	ctx context.Context,
 	messageID uuid.UUID,
 	data []byte,
@@ -59,7 +63,7 @@ func (m *MinIOStore) UploadVoiceMessage(
 }
 
 // DownloadVoiceMessage downloads a voice message from MinIO
-func (m *MinIOStore) DownloadVoiceMessage(ctx context.Context, objectName string) ([]byte, error) {
+func (m *MinIOVoiceStore) DownloadVoiceMessage(ctx context.Context, objectName string) ([]byte, error) {
 	object, err := m.client.GetObject(ctx, m.bucketName, objectName, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object: %w", err)
@@ -75,7 +79,7 @@ func (m *MinIOStore) DownloadVoiceMessage(ctx context.Context, objectName string
 }
 
 // DeleteVoiceMessage deletes a voice message from MinIO
-func (m *MinIOStore) DeleteVoiceMessage(ctx context.Context, objectName string) error {
+func (m *MinIOVoiceStore) DeleteVoiceMessage(ctx context.Context, objectName string) error {
 	err := m.client.RemoveObject(ctx, m.bucketName, objectName, minio.RemoveObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to delete object: %w", err)
@@ -84,7 +88,7 @@ func (m *MinIOStore) DeleteVoiceMessage(ctx context.Context, objectName string) 
 }
 
 // DeleteVoiceMessage deletes a voice message from MinIO
-func (m *MinIOStore) GetPresignedURL(ctx context.Context, objectName string, expiry time.Duration) (string, error) {
+func (m *MinIOVoiceStore) GetPresignedURL(ctx context.Context, objectName string, expiry time.Duration) (string, error) {
 	url, err := m.client.PresignedGetObject(ctx, m.bucketName, objectName, expiry, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate presigned url: %w", err)
@@ -93,7 +97,7 @@ func (m *MinIOStore) GetPresignedURL(ctx context.Context, objectName string, exp
 }
 
 // GetObjectInfo retrieves metadata about a stored object
-func (m *MinIOStore) GetObjectInfo(ctx context.Context, objectName string) (*minio.ObjectInfo, error) {
+func (m *MinIOVoiceStore) GetObjectInfo(ctx context.Context, objectName string) (*minio.ObjectInfo, error) {
 	info, err := m.client.StatObject(ctx, m.bucketName, objectName, minio.StatObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get object info: %w", err)
