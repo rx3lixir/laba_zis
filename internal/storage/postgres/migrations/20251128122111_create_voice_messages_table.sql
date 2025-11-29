@@ -9,8 +9,8 @@ CREATE TABLE voice_messages (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_voice_messages_room_id_created_at ON messages(room_id, created_at DESC);
-CREATE INDEX idx_voice_messages_sender_id ON messages(sender_id);
+CREATE INDEX idx_voice_messages_room_id_created_at ON voice_messages(room_id, created_at DESC);
+CREATE INDEX idx_voice_messages_sender_id ON voice_messages(sender_id);
 -- +goose StatementEnd
 
 -- +goose Down

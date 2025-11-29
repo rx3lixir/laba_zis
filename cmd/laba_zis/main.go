@@ -10,6 +10,7 @@ import (
 
 	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/internal/config"
+	"github.com/rx3lixir/laba_zis/internal/room"
 	"github.com/rx3lixir/laba_zis/internal/server"
 	"github.com/rx3lixir/laba_zis/internal/storage/postgres"
 	"github.com/rx3lixir/laba_zis/internal/storage/s3"
@@ -67,6 +68,7 @@ func main() {
 		"db", c.MainDBParams.GetDSN(),
 	)
 
+	// Creating S3 storage
 	minioClient, err := s3.NewClient(
 		c.S3Params.Endpoint,
 		c.S3Params.AccessKeyID,
@@ -78,6 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Making sure it has a bucket that we need
 	if err := s3.EnsureBucket(ctx, minioClient, c.S3Params.BucketName); err != nil {
 		log.Error("Failed to ensure bucket exists", "error", err, "bucket", c.S3Params.BucketName)
 		os.Exit(1)
@@ -88,7 +91,9 @@ func main() {
 
 	// Create stores
 	userStore := user.NewPostgresStore(pool)
-	voiceMessageStore := voice.NewMinIOVoiceStore(minioClient, c.S3Params.BucketName)
+	roomStore := room.NewPostgresStore(pool)
+	voiceMessageDBStore := voice.NewPostgresStore(pool)
+	voiceMessageFileStore := voice.NewMinIOVoiceStore(minioClient, c.S3Params.BucketName)
 
 	// Create auth service
 	authService := auth.NewService(
@@ -99,14 +104,19 @@ func main() {
 
 	// Create Handlers
 	userHandler := user.NewHandler(userStore, authService, *log)
+	roomHandler := room.NewHandler(roomStore, *log)
+	voiceHandler := voice.NewHandler(voiceMessageDBStore, voiceMessageFileStore, roomStore, *log)
 
 	// Setup router
 	router := server.NewRouter(server.RouterConfig{
-		UserHandler: userHandler,
-		AuthService: authService,
-		Log:         *log,
+		UserHandler:  userHandler,
+		RoomHandler:  roomHandler,
+		VoiceHandler: voiceHandler,
+		AuthService:  authService,
+		Log:          *log,
 	})
 
+	// Create server with all passed parameters
 	srv := server.New(c.HttpServerParams.GetAddress(), router, *log)
 
 	// Start server
@@ -121,20 +131,20 @@ func main() {
 
 	select {
 	case err := <-serverErrors:
-		log.Error("server error", "error", err)
+		log.Error("Server error", "error", err)
 		os.Exit(1)
 
 	case sig := <-shutdown:
-		log.Info("shutdown signal received", "signal", sig)
+		log.Info("Shutdown signal received", "signal", sig)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Error("graceful shutdown failed", "error", err)
+			log.Error("Graceful shutdown failed", "error", err)
 			os.Exit(1)
 		}
 
-		log.Info("server stopped")
+		log.Info("Server stopped")
 	}
 }
