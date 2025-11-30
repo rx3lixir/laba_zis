@@ -26,6 +26,7 @@ type Handler struct {
 	dbStore   VoiceMessageDBStore
 	fileStore VoiceMessageStore
 	roomStore RoomStore // We need to check if user is in room
+	wsHub     WebSocketHub
 	log       logger.Logger
 }
 
@@ -34,16 +35,23 @@ type RoomStore interface {
 	IsUserInRoom(ctx context.Context, roomID, userID uuid.UUID) (bool, error)
 }
 
+// WebSocketHub is the interface for broadcasting messages
+type WebSocketHub interface {
+	BroadcastToRoom(roomID uuid.UUID, message any)
+}
+
 func NewHandler(
 	dbStore VoiceMessageDBStore,
 	fileStore VoiceMessageStore,
 	roomStore RoomStore,
+	wsHub WebSocketHub,
 	log logger.Logger,
 ) *Handler {
 	return &Handler{
 		dbStore:   dbStore,
 		fileStore: fileStore,
 		roomStore: roomStore,
+		wsHub:     wsHub,
 		log:       log,
 	}
 }
@@ -197,6 +205,28 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 		"room_id", roomID,
 		"s3_key", s3Key,
 	)
+
+	if h.wsHub != nil {
+		wsMessage := map[string]any{
+			"type": "voice_message",
+			"data": map[string]any{
+				"id":               message.ID,
+				"room_id":          message.RoomID,
+				"sender_id":        message.SenderID,
+				"url":              url,
+				"duration_seconds": message.DurationSeconds,
+				"created_at":       message.CreatedAt,
+			},
+		}
+
+		h.wsHub.BroadcastToRoom(roomID, wsMessage)
+
+		h.log.Debug(
+			"Broadcasted voice message to WebSocket clients",
+			"room_id", roomID,
+			"message_id", message.ID,
+		)
+	}
 
 	writeJson(w, http.StatusCreated, response)
 }

@@ -7,15 +7,17 @@ import (
 	"github.com/rx3lixir/laba_zis/internal/room"
 	"github.com/rx3lixir/laba_zis/internal/user"
 	"github.com/rx3lixir/laba_zis/internal/voice"
+	"github.com/rx3lixir/laba_zis/internal/websocket"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 type RouterConfig struct {
-	UserHandler  *user.Handler
-	RoomHandler  *room.Handler
-	VoiceHandler *voice.Handler
-	Log          logger.Logger
-	AuthService  *auth.Service
+	UserHandler      *user.Handler
+	RoomHandler      *room.Handler
+	VoiceHandler     *voice.Handler
+	WebSocketHandler *websocket.Handler
+	Log              logger.Logger
+	AuthService      *auth.Service
 }
 
 func NewRouter(config RouterConfig) *chi.Mux {
@@ -48,6 +50,12 @@ func NewRouter(config RouterConfig) *chi.Mux {
 		r.Route("/user", func(r chi.Router) {
 			r.Use(auth.Middleware(config.AuthService))
 			config.UserHandler.RegisterUserRoutes(r)
+		})
+
+		// WebSocket routes - NEW
+		r.Route("/ws", func(r chi.Router) {
+			// Note: WebSocket handles auth via token query param, not middleware
+			config.WebSocketHandler.RegisterRoutes(r)
 		})
 	})
 

@@ -16,6 +16,7 @@ import (
 	"github.com/rx3lixir/laba_zis/internal/storage/s3"
 	"github.com/rx3lixir/laba_zis/internal/user"
 	"github.com/rx3lixir/laba_zis/internal/voice"
+	"github.com/rx3lixir/laba_zis/internal/websocket"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
@@ -85,6 +86,10 @@ func main() {
 		log.Error("Failed to ensure bucket exists", "error", err, "bucket", c.S3Params.BucketName)
 		os.Exit(1)
 	}
+
+	// Sleeping for storates to clean up
+	time.Sleep(time.Second * 1)
+
 	cancel()
 
 	log.Info("MinIO client initialized", "bucket", c.S3Params.BucketName)
@@ -102,18 +107,38 @@ func main() {
 		7*24*time.Hour, // refresh token
 	)
 
+	// Create WebSocket hub with application context
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+
+	wsHub := websocket.NewHub(appCtx, *log)
+
+	go wsHub.Run()
+
+	log.Info("WebSocket hub is started")
+
 	// Create Handlers
 	userHandler := user.NewHandler(userStore, authService, *log)
 	roomHandler := room.NewHandler(roomStore, *log)
-	voiceHandler := voice.NewHandler(voiceMessageDBStore, voiceMessageFileStore, roomStore, *log)
+	voiceHandler := voice.NewHandler(
+		voiceMessageDBStore,
+		voiceMessageFileStore,
+		roomStore,
+		wsHub,
+		*log,
+	)
+
+	userStoreAdapter := websocket.NewUserStoreAdapter(userStore)
+	wsHandler := websocket.NewHandler(wsHub, authService, roomStore, userStoreAdapter, *log)
 
 	// Setup router
 	router := server.NewRouter(server.RouterConfig{
-		UserHandler:  userHandler,
-		RoomHandler:  roomHandler,
-		VoiceHandler: voiceHandler,
-		AuthService:  authService,
-		Log:          *log,
+		UserHandler:      userHandler,
+		RoomHandler:      roomHandler,
+		VoiceHandler:     voiceHandler,
+		WebSocketHandler: wsHandler,
+		AuthService:      authService,
+		Log:              *log,
 	})
 
 	// Create server with all passed parameters
@@ -136,6 +161,8 @@ func main() {
 
 	case sig := <-shutdown:
 		log.Info("Shutdown signal received", "signal", sig)
+
+		appCancel()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
