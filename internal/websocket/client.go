@@ -26,13 +26,24 @@ const (
 
 // Client represents a single WebSocket connection
 type Client struct {
-	userID          uuid.UUID
-	username        string
-	roomID          uuid.UUID
-	conn            *websocket.Conn
-	hub             *Hub
-	send            chan *Message
-	log             logger.Logger
+	// User and room info
+	userID   uuid.UUID
+	username string
+	roomID   uuid.UUID
+
+	// WebSocket connection
+	conn *websocket.Conn
+
+	// Hub reference
+	hub *Hub
+
+	// Buffered channel of outbound messages
+	send chan *Message
+
+	// Logger
+	log logger.Logger
+
+	// Rate limiting
 	lastMessageTime time.Time
 	mu              sync.Mutex
 }
@@ -60,17 +71,31 @@ func NewClient(
 
 // readPump pumps messages from the WebSocket connection to the hub
 // The application runs readPump in a per-connection goroutine
+// readPump pumps messages from the WebSocket connection to the hub
 func (c *Client) readPump(ctx context.Context) {
 	defer func() {
 		c.hub.unregister <- c
-		c.conn.Close(websocket.StatusNormalClosure, "")
+		c.conn.Close(websocket.StatusNormalClosure, "read pump closed")
 	}()
 
-	// For now, we don't expect clients to send messages (all via REST)
-	// But we still need to read to detect disconnections and handle pongs
 	for {
-		_, _, err := c.conn.Read(ctx)
+		// Create a context for this specific read operation with a reasonable timeout
+		readCtx, cancel := context.WithTimeout(ctx, pongWait)
+
+		_, _, err := c.conn.Read(readCtx)
+		cancel() // Always cancel to free resources
+
 		if err != nil {
+			// Check if it's the hub shutting down
+			if ctx.Err() != nil {
+				c.log.Debug("Hub context cancelled, closing connection",
+					"user_id", c.userID,
+					"room_id", c.roomID,
+				)
+				return
+			}
+
+			// Check if it's a normal closure
 			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
 				websocket.CloseStatus(err) == websocket.StatusGoingAway {
 				c.log.Debug("Client disconnected normally",
@@ -88,7 +113,6 @@ func (c *Client) readPump(ctx context.Context) {
 		}
 
 		// If we ever want to handle client messages, add logic here
-		// For MVP, we just read to keep connection alive
 	}
 }
 
@@ -98,7 +122,7 @@ func (c *Client) writePump(ctx context.Context) {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close(websocket.StatusNormalClosure, "")
+		c.conn.Close(websocket.StatusNormalClosure, "write pump closed")
 	}()
 
 	for {
@@ -106,11 +130,16 @@ func (c *Client) writePump(ctx context.Context) {
 		case message, ok := <-c.send:
 			if !ok {
 				// Hub closed the channel
+				c.log.Debug("Send channel closed",
+					"user_id", c.userID,
+					"room_id", c.roomID,
+				)
 				c.conn.Close(websocket.StatusNormalClosure, "hub closed channel")
 				return
 			}
 
-			writeCtx, cancel := context.WithTimeout(ctx, writeWait)
+			// Don't use the parent context here - create a fresh one for each write
+			writeCtx, cancel := context.WithTimeout(context.Background(), writeWait)
 			err := c.writeMessage(writeCtx, message)
 			cancel()
 
@@ -125,7 +154,7 @@ func (c *Client) writePump(ctx context.Context) {
 
 		case <-ticker.C:
 			// Send ping to keep connection alive
-			writeCtx, cancel := context.WithTimeout(ctx, writeWait)
+			writeCtx, cancel := context.WithTimeout(context.Background(), writeWait)
 			err := c.conn.Ping(writeCtx)
 			cancel()
 
@@ -139,6 +168,11 @@ func (c *Client) writePump(ctx context.Context) {
 			}
 
 		case <-ctx.Done():
+			// Only exit when the hub is shutting down
+			c.log.Debug("Hub context cancelled, closing write pump",
+				"user_id", c.userID,
+				"room_id", c.roomID,
+			)
 			return
 		}
 	}

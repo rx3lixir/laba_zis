@@ -648,7 +648,15 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := RefreshTokenResponse{
+	// Frontend expect this
+	response := SigninResponse{
+		User: UserResponse{
+			ID:        user.ID,
+			Username:  user.Username,
+			Email:     user.Email,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+		},
 		AccessToken:  newAccessToken,
 		RefreshToken: newRefreshToken,
 		TokenType:    "Bearer",

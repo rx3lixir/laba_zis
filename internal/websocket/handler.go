@@ -79,7 +79,8 @@ func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
 	// Get JWT token from query parameter
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		h.log.Warn("WebSocket connection attempt without token",
+		h.log.Warn(
+			"WebSocket connection attempt without token",
 			"room_id", roomID,
 		)
 		http.Error(w, "Authentication token required", http.StatusUnauthorized)
@@ -89,7 +90,8 @@ func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
 	// Validate token
 	claims, err := h.authService.ValidateAccessToken(token)
 	if err != nil {
-		h.log.Warn("Invalid WebSocket authentication token",
+		h.log.Warn(
+			"Invalid WebSocket authentication token",
 			"room_id", roomID,
 			"error", err,
 		)
@@ -101,12 +103,13 @@ func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
 	username := claims.Username
 
 	// Verify user is a member of the room
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	isInRoomCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
-	isInRoom, err := h.roomStore.IsUserInRoom(ctx, roomID, userID)
+	isInRoom, err := h.roomStore.IsUserInRoom(isInRoomCtx, roomID, userID)
 	if err != nil {
-		h.log.Error("Failed to verify room membership",
+		h.log.Error(
+			"Failed to verify room membership",
 			"user_id", userID,
 			"room_id", roomID,
 			"error", err,
@@ -153,7 +156,9 @@ func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
 	connectedMsg := NewConnected(roomID, userID)
 	client.send <- connectedMsg
 
+	hubCtx := h.hub.ctx
+
 	// Start pumps
-	go client.writePump(r.Context())
-	go client.readPump(r.Context())
+	go client.writePump(hubCtx)
+	go client.readPump(hubCtx)
 }

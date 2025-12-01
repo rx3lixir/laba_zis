@@ -3,6 +3,7 @@ package server
 import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/internal/room"
 	"github.com/rx3lixir/laba_zis/internal/user"
@@ -29,6 +30,16 @@ func NewRouter(config RouterConfig) *chi.Mux {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
+
+	// CORS middleware
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:*", "https://localhost:*"}, // SvelteKit dev/preview ports
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth routes
