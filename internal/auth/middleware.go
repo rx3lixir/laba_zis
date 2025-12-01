@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -61,18 +60,15 @@ func Middleware(authService *Service) func(http.Handler) http.Handler {
 // Helper functions to extract from context
 func GetUserID(ctx context.Context) uuid.UUID {
 	userID, _ := ctx.Value(userIDKey).(uuid.UUID)
-	slog.Debug("ID extracted", userID)
 	return userID
 }
 
 func GetEmail(ctx context.Context) string {
 	email, _ := ctx.Value(userEmailKey).(string)
-	slog.Debug("Email extracted", email)
 	return email
 }
 
 func GetUsername(ctx context.Context) string {
 	username, _ := ctx.Value(userNameKey).(string)
-	slog.Debug("Username extracted", username)
 	return username
 }

@@ -38,11 +38,13 @@ func NewRouter(config RouterConfig) *chi.Mux {
 
 		// Chat rooms logic routes
 		r.Route("/rooms", func(r chi.Router) {
+			r.Use(auth.Middleware(config.AuthService))
 			config.RoomHandler.RegisterRoutes(r)
 		})
 
 		// Voice messages logic routes
 		r.Route("/messages", func(r chi.Router) {
+			r.Use(auth.Middleware(config.AuthService))
 			config.VoiceHandler.RegisterRoutes(r)
 		})
 
