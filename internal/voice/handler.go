@@ -143,7 +143,7 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Determine audio format from content type or filename
-	audioFormat := "opus" // default
+	audioFormat := "webm" // default
 
 	h.log.Debug(
 		"Uploading voice message",

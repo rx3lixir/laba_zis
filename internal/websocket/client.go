@@ -71,22 +71,17 @@ func NewClient(
 
 // readPump pumps messages from the WebSocket connection to the hub
 // The application runs readPump in a per-connection goroutine
-// readPump pumps messages from the WebSocket connection to the hub
 func (c *Client) readPump(ctx context.Context) {
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close(websocket.StatusNormalClosure, "read pump closed")
 	}()
 
+	// We expect no incoming data messages from clients, only pings/pongs (handled automatically by the lib).
+	// Just block on Read until the hub context is cancelled or the connection dies.
 	for {
-		// Create a context for this specific read operation with a reasonable timeout
-		readCtx, cancel := context.WithTimeout(ctx, pongWait)
-
-		_, _, err := c.conn.Read(readCtx)
-		cancel() // Always cancel to free resources
-
+		_, _, err := c.conn.Read(ctx)
 		if err != nil {
-			// Check if it's the hub shutting down
 			if ctx.Err() != nil {
 				c.log.Debug("Hub context cancelled, closing connection",
 					"user_id", c.userID,
@@ -95,9 +90,8 @@ func (c *Client) readPump(ctx context.Context) {
 				return
 			}
 
-			// Check if it's a normal closure
-			if websocket.CloseStatus(err) == websocket.StatusNormalClosure ||
-				websocket.CloseStatus(err) == websocket.StatusGoingAway {
+			closeStatus := websocket.CloseStatus(err)
+			if closeStatus == websocket.StatusNormalClosure || closeStatus == websocket.StatusGoingAway {
 				c.log.Debug("Client disconnected normally",
 					"user_id", c.userID,
 					"room_id", c.roomID,
@@ -111,8 +105,8 @@ func (c *Client) readPump(ctx context.Context) {
 			}
 			return
 		}
-
-		// If we ever want to handle client messages, add logic here
+		// If we ever get here it means the client sent a real message (unexpected) → ignore it
+		c.log.Debug("Ignored unexpected message from client")
 	}
 }
 
@@ -144,7 +138,8 @@ func (c *Client) writePump(ctx context.Context) {
 			cancel()
 
 			if err != nil {
-				c.log.Error("Failed to write message",
+				c.log.Error(
+					"Failed to write message",
 					"user_id", c.userID,
 					"room_id", c.roomID,
 					"error", err,

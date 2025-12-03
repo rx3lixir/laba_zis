@@ -33,7 +33,17 @@ func NewRouter(config RouterConfig) *chi.Mux {
 
 	// CORS middleware
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:*", "https://localhost:*"}, // SvelteKit dev/preview ports
+		AllowedOrigins: []string{
+			"http://localhost:*",
+			"https://localhost:*",
+			"http://0.0.0.0:8080",
+			"http://0.0.0.0:*",
+			"http://0.0.0.0:3000",
+			"http://192.168.43.xxx:3000",
+			"http://127.0.0.1:*",
+			"http://192.168.x.x:*",
+			"http://127.0.0.1:50676",
+		},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		ExposedHeaders:   []string{"Link"},

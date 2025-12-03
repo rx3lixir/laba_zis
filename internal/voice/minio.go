@@ -41,7 +41,7 @@ func (m *MinIOVoiceStore) UploadVoiceMessage(
 		audioFormat,
 	)
 
-	contentType := "audio/opus"
+	contentType := "audio/webm"
 
 	reader := bytes.NewReader(data)
 

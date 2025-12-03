@@ -28,6 +28,7 @@ func New(addr string, handler http.Handler, log logger.Logger) *Server {
 
 func (s *Server) Start() error {
 	s.log.Info("starting http server", "addr", s.httpServer.Addr)
+	// return s.httpServer.ListenAndServeTLS("internal/server/cert.pem", "internal/server/key.pem")
 	return s.httpServer.ListenAndServe()
 }
 
