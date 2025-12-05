@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
+	"github.com/rx3lixir/laba_zis/internal/websocket"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
@@ -26,6 +27,7 @@ type Handler struct {
 	dbStore   VoiceMessageDBStore
 	fileStore VoiceMessageStore
 	roomStore RoomStore // We need to check if user is in room
+	wsManager *websocket.Manager
 	log       logger.Logger
 }
 
@@ -38,12 +40,14 @@ func NewHandler(
 	dbStore VoiceMessageDBStore,
 	fileStore VoiceMessageStore,
 	roomStore RoomStore,
+	wsManager *websocket.Manager,
 	log logger.Logger,
 ) *Handler {
 	return &Handler{
 		dbStore:   dbStore,
 		fileStore: fileStore,
 		roomStore: roomStore,
+		wsManager: wsManager,
 		log:       log,
 	}
 }
@@ -197,6 +201,22 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 		"room_id", roomID,
 		"s3_key", s3Key,
 	)
+
+	event := websocket.Event{
+		Type: websocket.EventNewVoiceMessage,
+		Data: websocket.NewVoiceMessageEvent{
+			MessageID: message.ID,
+			RoomID:    message.RoomID,
+			SenderID:  message.SenderID,
+			Duration:  message.DurationSeconds,
+			URL:       url,
+			CreatedAt: message.CreatedAt.Unix(),
+		},
+	}
+
+	h.wsManager.BroadcastToRoom(message.RoomID, event)
+
+	h.log.Debug("Broadcasted new voice message", "message_id", message.ID, "room_id", message.RoomID)
 
 	writeJson(w, http.StatusCreated, response)
 }

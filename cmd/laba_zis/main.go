@@ -113,11 +113,12 @@ func main() {
 	// Create Handlers
 	userHandler := user.NewHandler(userStore, authService, *log)
 	roomHandler := room.NewHandler(roomStore, *log)
-	wsHandler := websocket.NewHandler(*wsManager, *log)
+	wsHandler := websocket.NewHandler(wsManager, authService, *log)
 	voiceHandler := voice.NewHandler(
 		voiceMessageDBStore,
 		voiceMessageFileStore,
 		roomStore,
+		wsManager,
 		*log,
 	)
 

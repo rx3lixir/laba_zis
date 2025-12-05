@@ -2,20 +2,25 @@ package websocket
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 type Handler struct {
-	manager Manager
-	log     logger.Logger
+	manager     *Manager
+	authService *auth.Service
+	log         logger.Logger
 }
 
-func NewHandler(wsManager Manager, log logger.Logger) *Handler {
+func NewHandler(wsManager *Manager, authService *auth.Service, log logger.Logger) *Handler {
 	return &Handler{
-		manager: wsManager,
-		log:     log,
+		manager:     wsManager,
+		authService: authService,
+		log:         log,
 	}
 }
 
@@ -24,5 +29,38 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 }
 
 func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
-	h.manager.ServeWS(w, r)
+	// Get room_id from query params
+	roomIDStr := r.URL.Query().Get("room_id")
+	if roomIDStr == "" {
+		http.Error(w, "room_id parameter required", http.StatusBadRequest)
+		return
+	}
+
+	roomID, err := uuid.Parse(roomIDStr)
+	if err != nil {
+		http.Error(w, "Invalid room_id format", http.StatusBadRequest)
+		return
+	}
+
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == r.Header.Get("Authorization") {
+		http.Error(w, "Missing authorization token", http.StatusUnauthorized)
+		return
+	}
+
+	claims, err := h.authService.ValidateAccessToken(token)
+	if err != nil {
+		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+		return
+	}
+
+	h.log.Info(
+		"Establishing websocket connection",
+		"user_id", claims.UserID,
+		"room_id", roomID,
+		"username", claims.Username,
+	)
+
+	// Upgrade and register the connection
+	h.manager.ServeWS(w, r, claims.UserID, roomID)
 }
