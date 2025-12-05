@@ -25,6 +25,7 @@ services:
     environment:
       MINIO_ROOT_USER: laba_admin
       MINIO_ROOT_PASSWORD: 12345678
+      MINIO_KMS_SECRET_KEY: "primary:OMK583/GzeLi+7UcVhA9N8bMnmU9aIq0msw6IEDeKcY="
     ports:
       - "9000:9000" # API
       - "9001:9001" # Web Console

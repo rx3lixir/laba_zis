@@ -13,12 +13,12 @@ import (
 )
 
 type RouterConfig struct {
-	UserHandler      *user.Handler
-	RoomHandler      *room.Handler
-	VoiceHandler     *voice.Handler
-	WebSocketHandler *websocket.Handler
-	Log              logger.Logger
-	AuthService      *auth.Service
+	UserHandler  *user.Handler
+	RoomHandler  *room.Handler
+	VoiceHandler *voice.Handler
+	WsHandler    *websocket.Handler
+	Log          logger.Logger
+	AuthService  *auth.Service
 }
 
 func NewRouter(config RouterConfig) *chi.Mux {
@@ -34,18 +34,22 @@ func NewRouter(config RouterConfig) *chi.Mux {
 	// CORS middleware
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins: []string{
-			"http://localhost:*",
-			"https://localhost:*",
-			"http://0.0.0.0:8080",
-			"http://0.0.0.0:*",
-			"http://0.0.0.0:3000",
-			"http://192.168.43.xxx:3000",
-			"http://127.0.0.1:*",
-			"http://192.168.x.x:*",
-			"http://127.0.0.1:50676",
+			"http://localhost:3000",
+			"https://localhost:3000",
 		},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{
+			"Accept",
+			"Authorization",
+			"Content-Type",
+			"X-Requested-With",
+			"Upgrade",
+			"Connection",
+			"Sec-Websocket-Key",
+			"Sec-Websocket-Version",
+			"Sec-Websocket-Extensions",
+			"Sec-Websocket-Protocol",
+		},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -75,10 +79,9 @@ func NewRouter(config RouterConfig) *chi.Mux {
 			config.UserHandler.RegisterUserRoutes(r)
 		})
 
-		// WebSocket routes - NEW
+		// Websocket connections
 		r.Route("/ws", func(r chi.Router) {
-			// Note: WebSocket handles auth via token query param, not middleware
-			config.WebSocketHandler.RegisterRoutes(r)
+			config.WsHandler.RegisterRoutes(r)
 		})
 	})
 
