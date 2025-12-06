@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/internal/websocket"
+	"github.com/rx3lixir/laba_zis/pkg/audio"
 	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
@@ -118,15 +119,15 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Get the audio file from form
-	file, _, err := r.FormFile("audio")
+	fileHandler, fileHeader, err := r.FormFile("audio")
 	if err != nil {
 		writeJson(w, http.StatusBadRequest, "Audio file is required")
 		return
 	}
-	defer file.Close()
+	defer fileHandler.Close()
 
 	// Read file data
-	data, err := io.ReadAll(file)
+	data, err := io.ReadAll(fileHandler)
 	if err != nil {
 		writeJson(w, http.StatusInternalServerError, "Failed to read audio file")
 		h.log.Error("Failed to read uploaded file", "error", err)
@@ -139,7 +140,11 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Determine audio format from content type or filename
-	audioFormat := "webm" // default
+	contentType := fileHeader.Header.Get("Content-Type")
+	filename := fileHeader.Filename
+
+	audioFormat := audio.DetectAudioFormat(contentType, filename)
+	h.log.Debug("Detected audio format", "content_type", contentType, "filename", filename, "format", audioFormat)
 
 	h.log.Debug(
 		"Uploading voice message",

@@ -34,12 +34,44 @@ func (h *Handler) RegisterUserRoutes(r chi.Router) {
 	r.Get("/{id}", h.HandleGetUserByID)
 	r.Get("/email/{email}", h.HandleGetUserByEmail)
 	r.Delete("/{id}", h.HandleDeleteUser)
+	r.Get("/me", h.HandleMe)
 }
 
 func (h *Handler) RegisterAuthRoutes(r chi.Router) {
 	r.Post("/signup", h.HandleSignup)
 	r.Post("/signin", h.HandleSignin)
 	r.Post("/refresh", h.HandleRefreshToken)
+}
+
+func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
+	userID := auth.GetUserID(r.Context())
+	if userID == uuid.Nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ID is invalid"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	defer cancel()
+
+	user, err := h.store.GetUserByID(ctx, userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(
+		map[string]any{
+			"id":       user.ID,
+			"username": user.Username,
+			"email":    user.Email,
+		},
+	)
 }
 
 func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {

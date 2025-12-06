@@ -42,8 +42,18 @@ func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == r.Header.Get("Authorization") {
+	// Try to get token from Authorization header first
+	token := r.Header.Get("Authorization")
+	if token != "" {
+		token = strings.TrimPrefix(token, "Bearer ")
+	}
+
+	// If not in header, try query param (for browsers that don't support headers in WebSocket)
+	if token == "" || token == r.Header.Get("Authorization") {
+		token = r.URL.Query().Get("token")
+	}
+
+	if token == "" {
 		http.Error(w, "Missing authorization token", http.StatusUnauthorized)
 		return
 	}

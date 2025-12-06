@@ -41,8 +41,6 @@ func (m *MinIOVoiceStore) UploadVoiceMessage(
 		audioFormat,
 	)
 
-	contentType := "audio/webm"
-
 	reader := bytes.NewReader(data)
 
 	_, err := m.client.PutObject(
@@ -52,7 +50,7 @@ func (m *MinIOVoiceStore) UploadVoiceMessage(
 		reader,
 		int64(len(data)),
 		minio.PutObjectOptions{
-			ContentType: contentType,
+			ContentType: audioFormat,
 		},
 	)
 	if err != nil {
