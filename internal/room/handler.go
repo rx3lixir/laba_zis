@@ -3,21 +3,21 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 type Handler struct {
 	store Store
-	log   logger.Logger
+	log   *slog.Logger
 }
 
-func NewHandler(store Store, log logger.Logger) *Handler {
+func NewHandler(store Store, log *slog.Logger) *Handler {
 	return &Handler{
 		store: store,
 		log:   log,

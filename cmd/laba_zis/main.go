@@ -36,11 +36,10 @@ func main() {
 	}
 
 	// Logger initializaion
-	log := logger.Must(logger.New(logger.Config{
-		Env:              c.GeneralParams.Env,
-		AddSource:        true,
-		SourcePathLength: 0,
-	}))
+	log := logger.New(logger.Config{
+		Env:    c.GeneralParams.Env,
+		Output: os.Stdout,
+	})
 
 	log.Info(
 		"Configuration loaded",
@@ -108,18 +107,18 @@ func main() {
 	)
 
 	// Creating websocket manager
-	wsManager := websocket.NewManager(*log)
+	wsManager := websocket.NewManager(log)
 
 	// Create Handlers
-	userHandler := user.NewHandler(userStore, authService, *log)
-	roomHandler := room.NewHandler(roomStore, *log)
-	wsHandler := websocket.NewHandler(wsManager, authService, *log)
+	roomHandler := room.NewHandler(roomStore, log)
+	userHandler := user.NewHandler(userStore, authService, log)
+	wsHandler := websocket.NewHandler(wsManager, authService, log)
 	voiceHandler := voice.NewHandler(
 		voiceMessageDBStore,
 		voiceMessageFileStore,
 		roomStore,
 		wsManager,
-		*log,
+		log,
 	)
 
 	// Setup router
@@ -129,11 +128,11 @@ func main() {
 		VoiceHandler: voiceHandler,
 		AuthService:  authService,
 		WsHandler:    wsHandler,
-		Log:          *log,
+		Log:          log,
 	})
 
 	// Create server with all passed parameters
-	srv := server.New(c.HttpServerParams.GetAddress(), router, *log)
+	srv := server.New(c.HttpServerParams.GetAddress(), router, log)
 
 	// Start server
 	serverErrors := make(chan error, 1)

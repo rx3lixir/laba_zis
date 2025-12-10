@@ -2,12 +2,12 @@ package websocket
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 var websocketUpgrader = websocket.Upgrader{
@@ -22,10 +22,10 @@ type Manager struct {
 	clients   ClientList
 	roomIndex map[uuid.UUID]ClientList
 	sync.RWMutex
-	log logger.Logger
+	log *slog.Logger
 }
 
-func NewManager(log logger.Logger) *Manager {
+func NewManager(log *slog.Logger) *Manager {
 	return &Manager{
 		clients:   make(ClientList),
 		roomIndex: make(map[uuid.UUID]ClientList),

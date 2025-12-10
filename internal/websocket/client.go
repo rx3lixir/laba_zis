@@ -2,12 +2,12 @@ package websocket
 
 import (
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 const (
@@ -31,7 +31,7 @@ type Client struct {
 	userID     uuid.UUID
 	roomID     uuid.UUID
 	egress     chan []byte
-	log        logger.Logger
+	log        *slog.Logger
 }
 
 type ClientList map[*Client]bool
@@ -42,7 +42,7 @@ type roomClients struct {
 }
 
 // NewClient creates a new websocket client
-func NewClient(conn *websocket.Conn, manager *Manager, userID, roomID uuid.UUID, log logger.Logger) *Client {
+func NewClient(conn *websocket.Conn, manager *Manager, userID, roomID uuid.UUID, log *slog.Logger) *Client {
 	return &Client{
 		connection: conn,
 		manager:    manager,

@@ -37,6 +37,6 @@ func DetectAudioFormat(contentType, filename string) string {
 	case strings.Contains(contentType, "wav"):
 		return "wav"
 	default:
-		return "webm" // safest default
+		return "webm"
 	}
 }

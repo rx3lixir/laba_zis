@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,17 +12,17 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
+	"github.com/rx3lixir/laba_zis/pkg/httputil"
 	"github.com/rx3lixir/laba_zis/pkg/password"
 )
 
 type Handler struct {
 	store       Store
 	authService *auth.Service
-	log         logger.Logger
+	log         *slog.Logger
 }
 
-func NewHandler(store Store, authService *auth.Service, log logger.Logger) *Handler {
+func NewHandler(store Store, authService *auth.Service, log *slog.Logger) *Handler {
 	return &Handler{
 		store:       store,
 		authService: authService,
@@ -30,7 +31,7 @@ func NewHandler(store Store, authService *auth.Service, log logger.Logger) *Hand
 }
 
 func (h *Handler) RegisterUserRoutes(r chi.Router) {
-	r.Get("/", h.HandleGetAllUsers)
+	r.Get("/", httputil.Handler(h.HandleGetAllUsers))
 	r.Get("/{id}", h.HandleGetUserByID)
 	r.Get("/email/{email}", h.HandleGetUserByEmail)
 	r.Delete("/{id}", h.HandleDeleteUser)
@@ -210,7 +211,7 @@ func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // Handles getting all users from database
-func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) error {
 	limitQuery := r.URL.Query().Get("limit")
 	offsetQuery := r.URL.Query().Get("offset")
 

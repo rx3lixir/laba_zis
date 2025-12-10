@@ -1,22 +1,22 @@
 package websocket
 
 import (
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 type Handler struct {
 	manager     *Manager
 	authService *auth.Service
-	log         logger.Logger
+	log         *slog.Logger
 }
 
-func NewHandler(wsManager *Manager, authService *auth.Service, log logger.Logger) *Handler {
+func NewHandler(wsManager *Manager, authService *auth.Service, log *slog.Logger) *Handler {
 	return &Handler{
 		manager:     wsManager,
 		authService: authService,

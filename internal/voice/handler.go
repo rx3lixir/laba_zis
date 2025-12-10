@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,7 +14,6 @@ import (
 	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/internal/websocket"
 	"github.com/rx3lixir/laba_zis/pkg/audio"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 const (
@@ -29,7 +29,7 @@ type Handler struct {
 	fileStore VoiceMessageStore
 	roomStore RoomStore // We need to check if user is in room
 	wsManager *websocket.Manager
-	log       logger.Logger
+	log       *slog.Logger
 }
 
 // RoomStore is a minimal interface for room verification
@@ -42,7 +42,7 @@ func NewHandler(
 	fileStore VoiceMessageStore,
 	roomStore RoomStore,
 	wsManager *websocket.Manager,
-	log logger.Logger,
+	log *slog.Logger,
 ) *Handler {
 	return &Handler{
 		dbStore:   dbStore,

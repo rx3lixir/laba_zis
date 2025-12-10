@@ -2,18 +2,17 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 type Server struct {
 	httpServer *http.Server
-	log        logger.Logger
+	log        *slog.Logger
 }
 
-func New(addr string, handler http.Handler, log logger.Logger) *Server {
+func New(addr string, handler http.Handler, log *slog.Logger) *Server {
 	return &Server{
 		httpServer: &http.Server{
 			Addr:         addr,

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"log/slog"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -9,7 +11,6 @@ import (
 	"github.com/rx3lixir/laba_zis/internal/user"
 	"github.com/rx3lixir/laba_zis/internal/voice"
 	"github.com/rx3lixir/laba_zis/internal/websocket"
-	"github.com/rx3lixir/laba_zis/pkg/logger"
 )
 
 type RouterConfig struct {
@@ -17,17 +18,15 @@ type RouterConfig struct {
 	RoomHandler  *room.Handler
 	VoiceHandler *voice.Handler
 	WsHandler    *websocket.Handler
-	Log          logger.Logger
+	Log          *slog.Logger
 	AuthService  *auth.Service
 }
 
 func NewRouter(config RouterConfig) *chi.Mux {
 	r := chi.NewRouter()
-	log := config.Log
 
 	// Global middleware
 	r.Use(middleware.RequestID)
-	r.Use(RequestLogger(log))
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
