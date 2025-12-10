@@ -13,7 +13,18 @@ import (
 	"github.com/google/uuid"
 )
 
-type Handler func(http.ResponseWriter, *http.Request) error
+// HandlerFunc is a custom handler that can return errors
+type HandlerFunc func(http.ResponseWriter, *http.Request) error
+
+// Handler wraps error-returning handler into a standard http.HandlerFunc
+// This is the key adapter that makes everything work
+func Handler(h HandlerFunc, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := h(w, r); err != nil {
+			RespondError(w, r, err, log)
+		}
+	}
+}
 
 // Centralized error responder
 func RespondError(w http.ResponseWriter, r *http.Request, err error, log *slog.Logger) {
@@ -28,7 +39,7 @@ func RespondError(w http.ResponseWriter, r *http.Request, err error, log *slog.L
 		}
 	}
 
-	// Logging cause
+	// Logging based on severity
 	if httpErr.Status >= 500 {
 		log.Error(
 			"request failed",
@@ -47,25 +58,30 @@ func RespondError(w http.ResponseWriter, r *http.Request, err error, log *slog.L
 		)
 	}
 
-	// Response
+	// Send response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpErr.Status)
 
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	response := map[string]any{
 		"error":      httpErr.Message,
-		"details":    httpErr.Details,
 		"request_id": reqID,
-	})
+	}
+
+	if httpErr.Details != nil {
+		response["details"] = httpErr.Details
+	}
+
+	_ = json.NewEncoder(w).Encode(response)
 }
 
-// JSON — simple success responder
+// RespondJSON sends a successful JSON response
 func RespondJSON(w http.ResponseWriter, status int, data any) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	return json.NewEncoder(w).Encode(data)
 }
 
-// DecodeJSON decodes request body into target
+// DecodeJSON decodes request body into target with validation
 func DecodeJSON(r *http.Request, target any) error {
 	if r.Body == nil || r.ContentLength == 0 {
 		return BadRequest("Request body is required")
@@ -76,14 +92,14 @@ func DecodeJSON(r *http.Request, target any) error {
 
 	if err := decoder.Decode(target); err != nil {
 		return BadRequest("Invalid JSON format", map[string]string{
-			"error": err.Error(),
+			"parse_error": err.Error(),
 		})
 	}
 
 	return nil
 }
 
-// ParseUUID parses UUID from URL parameter
+// ParseUUID extracts and parses a UUID from URL parameters
 func ParseUUID(r *http.Request, paramName string) (uuid.UUID, error) {
 	idStr := chi.URLParam(r, paramName)
 	if idStr == "" {
@@ -98,7 +114,7 @@ func ParseUUID(r *http.Request, paramName string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// GetRequestID extracts the request ID from context (safe fallback)
+// getReqID safely extracts request ID from context
 func getReqID(ctx context.Context) string {
 	if ctx == nil {
 		return "unknown"

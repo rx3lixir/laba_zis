@@ -2,7 +2,6 @@ package room
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -10,71 +9,60 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
+	"github.com/rx3lixir/laba_zis/pkg/httputil"
 )
 
 type Handler struct {
-	store Store
-	log   *slog.Logger
+	store     Store
+	log       *slog.Logger
+	dbTimeout time.Duration
 }
 
-func NewHandler(store Store, log *slog.Logger) *Handler {
-	return &Handler{
-		store: store,
-		log:   log,
+func NewHandler(store Store, log *slog.Logger, dbTimeout time.Duration) *Handler {
+	if dbTimeout == 0 {
+		dbTimeout = time.Second * 5
 	}
-}
-
-func writeJson(w http.ResponseWriter, status int, response any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(response)
-}
-
-func writeError(w http.ResponseWriter, status int, error string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": error})
+	return &Handler{store, log, dbTimeout}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Post("/", h.HandleCreateRoom)
-	r.Get("/", h.HandleGetUserRooms)
-	r.Get("/{roomID}", h.HandleGetRoom)
-	r.Delete("/{roomID}", h.HandleDeleteRoom)
-	r.Post("/{roomID}/participants", h.HandleAddParticipant)
-	r.Delete("/{roomID}/participants/{userID}", h.HandleRemoveParticipant)
-	r.Get("/{roomID}/participants", h.HandleGetParticipants)
+	r.Post("/", httputil.Handler(h.HandleCreateRoom, h.log))
+	r.Get("/", httputil.Handler(h.HandleGetUserRooms, h.log))
+	r.Get("/{roomID}", httputil.Handler(h.HandleGetRoom, h.log))
+	r.Delete("/{roomID}", httputil.Handler(h.HandleDeleteRoom, h.log))
+	r.Post("/{roomID}/participants", httputil.Handler(h.HandleAddParticipant, h.log))
+	r.Delete("/{roomID}/participants/{userID}", httputil.Handler(h.HandleRemoveParticipant, h.log))
+	r.Get("/{roomID}/participants", httputil.Handler(h.HandleGetParticipants, h.log))
+}
+
+// Context that handles database requests
+func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), h.dbTimeout)
 }
 
 // HandleCreateRoom creates a new room with initial participants
-func (h *Handler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) error {
 	creatorID := auth.GetUserID(r.Context())
 	if creatorID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "Unauthorized")
-		return
+		h.log.Debug("unauthorized room creation attempt", "creator_id", creatorID)
+		return httputil.Unauthorized("Unauthorized")
 	}
 
 	req := new(CreateRoomRequest)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusInternalServerError, "Invalid JSON")
-		return
+	if err := httputil.DecodeJSON(r, req); err != nil {
+		return err
 	}
 
-	h.log.Debug(
-		"Creating room",
-		"creator_id", creatorID,
-		"participant_count", len(req.ParticipantIDs),
-	)
+	h.log.Info("room creation started", "creator_id", creatorID, "requested_participants", len(req.ParticipantIDs))
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	room := &Room{}
 
 	if err := h.store.CreateRoom(ctx, room); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to create room")
-		h.log.Error("Failed to create room", "error", err)
-		return
+		h.log.Error("failed to create room", "error", err)
+		return httputil.Internal(err)
 	}
 
 	// Add creator as participant
@@ -97,58 +85,63 @@ func (h *Handler) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
 	// Adding all participants into database
 	for _, p := range participants {
 		if err := h.store.AddParticipant(ctx, p); err != nil {
-			h.log.Warn("Failed to add participant", "user_id", p.UserID, "error", err)
-			continue
+			h.log.Error(
+				"failed to add participant during room creation",
+				"room_id", room.ID,
+				"user_id", p.UserID,
+				"error", err,
+			)
+			return httputil.Internal(err) // fail whole operation
 		}
 		addedParticipants = append(addedParticipants, *p)
 	}
+
+	h.log.Info(
+		"room created successfully",
+		"room_id", room.ID,
+		"creator_id", creatorID,
+		"total_participants", len(participants),
+	)
 
 	response := CreateRoomResponse{
 		Room:         *room,
 		Participants: addedParticipants,
 	}
 
-	h.log.Debug("Room created",
-		"room_id", room.ID,
-		"participants", len(addedParticipants),
-	)
-
-	writeJson(w, http.StatusCreated, response)
+	return httputil.RespondJSON(w, http.StatusCreated, response)
 }
 
 // HandleGetRoom gets room details with participants
-func (h *Handler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGetRoom(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
-	roomID, err := uuid.Parse(chi.URLParam(r, "roomID"))
+	roomID, err := httputil.ParseUUID(r, "roomID")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Room ID is invalid")
-		return
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	isInRoom, err := h.store.IsUserInRoom(ctx, roomID, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to verify access")
-		return
+		h.log.Debug("Failed to check if user is in room", "user", userID, "error", err)
+		return httputil.Internal(err)
 	}
 
 	if !isInRoom {
-		writeError(w, http.StatusForbidden, "You are not a member of this room")
-		return
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	room, err := h.store.GetRoomByID(ctx, roomID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "Room not found")
-		return
+		h.log.Debug("Failed to retrieve room from database", "roomID", room, "error", err)
+		return httputil.NotFound("Room not found")
 	}
 
 	participants, err := h.store.GetRoomParticipants(ctx, roomID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to get participants")
-		return
+		h.log.Debug("Failed to retrieve room from database", "roomID", room, "error", err)
+		return httputil.Internal(err)
 	}
 
 	participantsList := make([]RoomParticipant, len(participants))
@@ -161,22 +154,24 @@ func (h *Handler) HandleGetRoom(w http.ResponseWriter, r *http.Request) {
 		Participants: participantsList,
 	}
 
-	writeJson(w, http.StatusOK, response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
 // HandleGetUserRooms gets all rooms the authenticated user is part of
-func (h *Handler) HandleGetUserRooms(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGetUserRooms(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	rooms, err := h.store.GetUserRooms(ctx, userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to get rooms")
-		h.log.Error("Failed to get user rooms", "user_id", userID, "error", err)
-		return
+		h.log.Error("failed to get user rooms", "user_id", userID, "error", err)
+		return httputil.Internal(err)
 	}
+
+	// TODO: N+1 query problem — replace with batch loading when scaling
+	// Consider adding GetRoomsWithParticipants(ctx, userI
 
 	roomResponses := make([]RoomResponse, 0, len(rooms))
 
@@ -184,18 +179,18 @@ func (h *Handler) HandleGetUserRooms(w http.ResponseWriter, r *http.Request) {
 	for _, room := range rooms {
 		participants, err := h.store.GetRoomParticipants(ctx, room.ID)
 		if err != nil {
-			h.log.Warn("Failed to get participants for room", "room_id", room.ID, "error", err)
-			continue
+			h.log.Warn("failed to load participants for room", "room_id", room.ID, "error", err)
+			participants = nil
 		}
 
-		participantsList := make([]RoomParticipant, len(participants))
+		plist := make([]RoomParticipant, len(participants))
 		for i, p := range participants {
-			participantsList[i] = *p
+			plist[i] = *p
 		}
 
 		roomResponses = append(roomResponses, RoomResponse{
 			Room:         *room,
-			Participants: participantsList,
+			Participants: plist,
 		})
 	}
 
@@ -204,71 +199,66 @@ func (h *Handler) HandleGetUserRooms(w http.ResponseWriter, r *http.Request) {
 		Count: len(roomResponses),
 	}
 
-	h.log.Debug("Retrieved user rooms", "user_id", userID, "count", len(roomResponses))
+	h.log.Info("user rooms retrieved", "user_id", userID, "room_count", len(roomResponses))
 
-	writeJson(w, http.StatusOK, response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
 // HandleDeleteRoom deletes a room (only if user is a participant)
-func (h *Handler) HandleDeleteRoom(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleDeleteRoom(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
-	roomID, err := uuid.Parse(chi.URLParam(r, "roomID"))
+
+	roomID, err := httputil.ParseUUID(r, "roomID")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid room ID")
-		return
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Check if user is in the room
 	isInRoom, err := h.store.IsUserInRoom(ctx, roomID, userID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, "Failed to verify access")
-		return
+		h.log.Error("failed to verify room membership", "room_id", roomID, "user_id", userID, "error", err)
+		return httputil.Forbidden("Failed to verify access")
 	}
 
 	if !isInRoom {
-		writeError(w, http.StatusForbidden, "You are not a member of this room")
-		return
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	if err := h.store.DeleteRoom(ctx, roomID); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to delete room")
-		return
+		h.log.Error("failed to delete room", "room_id", roomID, "user_id", userID, "error", err)
+		return httputil.Internal(err)
 	}
 
-	h.log.Debug("Room deleted", "room_id", roomID, "by_user", userID)
+	h.log.Info("room deleted", "room_id", roomID, "deleted_by", userID)
 
-	writeJson(w, http.StatusOK, "Room deleted successfully")
+	return httputil.RespondJSON(w, http.StatusNoContent, map[string]string{"message": "Room deleted successfully"})
 }
 
 // HandleAddParticipant adds a user to the room
-func (h *Handler) HandleAddParticipant(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleAddParticipant(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
-	roomID, err := uuid.Parse(chi.URLParam(r, "roomID"))
+
+	roomID, err := httputil.ParseUUID(r, "roomID")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid JSON")
-		return
+		return err
 	}
 
 	req := new(AddParticipantRequest)
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid JSON")
-		return
+	if err := httputil.DecodeJSON(r, req); err != nil {
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Check if requester is in the room
 	isInRoom, err := h.store.IsUserInRoom(ctx, roomID, userID)
 	if err != nil || !isInRoom {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{"error": "You are not a member of this room"})
-		return
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	participant := &RoomParticipant{
@@ -277,79 +267,75 @@ func (h *Handler) HandleAddParticipant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.AddParticipant(ctx, participant); err != nil {
-		writeJson(w, http.StatusInternalServerError, "Failed to add participant")
-		return
+		h.log.Error("failed to add participant", "room_id", roomID, "user_id", req.UserID, "error", err)
+		return httputil.Internal(err)
 	}
 
-	h.log.Debug("Participant added", "room_id", roomID, "user_id", req.UserID)
+	h.log.Info("participant added", "room_id", roomID, "user_id", req.UserID, "added_by", userID)
 
-	writeJson(w, http.StatusOK, participant)
+	return httputil.RespondJSON(w, http.StatusOK, participant)
 }
 
 // HandleRemoveParticipant removes a user from the room
-func (h *Handler) HandleRemoveParticipant(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleRemoveParticipant(w http.ResponseWriter, r *http.Request) error {
 	requestingUserID := auth.GetUserID(r.Context())
-	roomID, err := uuid.Parse(chi.URLParam(r, "roomID"))
+	roomID, err := httputil.ParseUUID(r, "roomID")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid room ID")
-		return
+		return err
 	}
 
 	userIDToRemove, err := uuid.Parse(chi.URLParam(r, "userID"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid user ID")
-		return
+		return httputil.BadRequest("Invalid user ID")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Check if requester is in the room
 	isInRoom, err := h.store.IsUserInRoom(ctx, roomID, requestingUserID)
 	if err != nil || !isInRoom {
-		writeError(w, http.StatusForbidden, "You are not a member of this room")
-		return
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
-	// Users can only remove themselves (for now - you could add admin logic later)
+	// Users can only remove themselves (add admin logic later)
 	if userIDToRemove != requestingUserID {
-		writeError(w, http.StatusForbidden, "You can only remove yourself from rooms")
-		return
+		return httputil.Forbidden("You can only remove yourself from room")
 	}
 
 	if err := h.store.RemoveParticipant(ctx, roomID, userIDToRemove); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to remove participant")
-		return
+		h.log.Error("failed to remove participant", "room_id", roomID, "user_id", userIDToRemove, "error", err)
+		return httputil.Internal(err)
 	}
 
-	h.log.Debug("Participant removed", "room_id", roomID, "user_id", userIDToRemove)
+	h.log.Info("participant removed", "room_id", roomID, "user_id", userIDToRemove)
 
-	writeJson(w, http.StatusOK, "Participant removed successfully")
+	return httputil.RespondJSON(w, http.StatusNoContent, map[string]string{
+		"message": "Participant removed successfully",
+	})
 }
 
 // HandleGetParticipants gets all participants in a room
-func (h *Handler) HandleGetParticipants(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGetParticipants(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
-	roomID, err := uuid.Parse(chi.URLParam(r, "roomID"))
+
+	roomID, err := httputil.ParseUUID(r, "roomID")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid room ID")
-		return
+		return err
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Check if user is in the room
 	isInRoom, err := h.store.IsUserInRoom(ctx, roomID, userID)
 	if err != nil || !isInRoom {
-		writeError(w, http.StatusForbidden, "Your are not a member of this room")
-		return
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	participants, err := h.store.GetRoomParticipants(ctx, roomID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to get participants")
-		return
+		return httputil.Internal(err)
 	}
 
 	// Convert to response format
@@ -358,8 +344,10 @@ func (h *Handler) HandleGetParticipants(w http.ResponseWriter, r *http.Request) 
 		participantsList[i] = *p
 	}
 
-	writeJson(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"participants": participantsList,
 		"count":        len(participantsList),
-	})
+	}
+
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }

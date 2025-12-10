@@ -2,7 +2,6 @@ package user
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -20,100 +19,83 @@ type Handler struct {
 	store       Store
 	authService *auth.Service
 	log         *slog.Logger
+	dbTimeout   time.Duration
 }
 
-func NewHandler(store Store, authService *auth.Service, log *slog.Logger) *Handler {
-	return &Handler{
-		store:       store,
-		authService: authService,
-		log:         log,
+func NewHandler(store Store, authService *auth.Service, log *slog.Logger, dbTimeout time.Duration) *Handler {
+	if dbTimeout == 0 {
+		dbTimeout = 5 * time.Second
 	}
+	return &Handler{store, authService, log, dbTimeout}
 }
 
+// RegisterUserRoutes registers all user-related endpoints under the provided router.
 func (h *Handler) RegisterUserRoutes(r chi.Router) {
-	r.Get("/", httputil.Handler(h.HandleGetAllUsers))
-	r.Get("/{id}", h.HandleGetUserByID)
-	r.Get("/email/{email}", h.HandleGetUserByEmail)
-	r.Delete("/{id}", h.HandleDeleteUser)
-	r.Get("/me", h.HandleMe)
+	r.Get("/", httputil.Handler(h.HandleGetAllUsers, h.log))
+	r.Get("/{id}", httputil.Handler(h.HandleGetUserByID, h.log))
+	r.Get("/email/{email}", httputil.Handler(h.HandleGetUserByEmail, h.log))
+	r.Delete("/{id}", httputil.Handler(h.HandleDeleteUser, h.log))
+	r.Get("/me", httputil.Handler(h.HandleMe, h.log))
 }
 
+// RegisterAuthRoutes registers authentication-related endpoints (signup, signin refresh).
 func (h *Handler) RegisterAuthRoutes(r chi.Router) {
-	r.Post("/signup", h.HandleSignup)
-	r.Post("/signin", h.HandleSignin)
-	r.Post("/refresh", h.HandleRefreshToken)
+	r.Post("/signup", httputil.Handler(h.HandleSignup, h.log))
+	r.Post("/signin", httputil.Handler(h.HandleSignin, h.log))
+	r.Post("/refresh", httputil.Handler(h.HandleRefreshToken, h.log))
 }
 
-func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) {
+// Context that handles database requests
+func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), h.dbTimeout)
+}
+
+// HandleMe returns the currently authenticated user's profile.
+func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
 	if userID == uuid.Nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "ID is invalid"})
-		return
+		return httputil.Unauthorized("User ID is invalid")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
-		return
+		return httputil.NotFound("User not found")
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(
-		map[string]any{
-			"id":       user.ID,
-			"username": user.Username,
-			"email":    user.Email,
-		},
-	)
+	response := map[string]any{
+		"id":       user.ID,
+		"username": user.Username,
+		"email":    user.Email,
+	}
+
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
-func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
+// HandleCreateUser - creates a new user
+func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) error {
 	req := new(CreateUserRequest)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
-
-		return
+	if err := httputil.DecodeJSON(r, req); err != nil {
+		return err
 	}
 
-	h.log.Debug(
-		"recieved request",
-		"handler", "HandleAddUser",
-		"email", req.Email,
-	)
+	h.log.Debug("recieved request", "email", req.Email)
 
 	if err := validateCreateUserRequest(req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to validate user"})
-
 		h.log.Error(
 			"User validation failed",
 			"user_email", req.Email,
 			"error", err,
 		)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to proccess password"})
-
-		h.log.Error("Failed to hash passowrd", "error", err)
-
-		return
+		h.log.Error("Failed to hash passoword", "error", err)
+		return httputil.Internal(err)
 	}
 
 	newUser := &User{
@@ -122,17 +104,12 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Password: string(hashedPassword),
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	if err := h.store.CreateUser(ctx, newUser); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create user"})
-
 		h.log.Error("Failed to create user", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	response := CreateUserResponse{
@@ -148,47 +125,24 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"user_id", newUser.ID,
 	)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
-// Handles getting user using it's ID
-func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if id == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User ID required"})
-
-		return
-	}
-
-	userID, err := uuid.Parse(id)
+// HandleGetUserByID retrieves a user by their UUID.
+func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) error {
+	userID, err := httputil.ParseUUID(r, "id")
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user ID format"})
-
-		return
+		return err
 	}
 
-	h.log.Debug(
-		"Received request",
-		"handler", "HandleGetUserByID",
-		"id", id,
-	)
+	h.log.Debug("Fetching user by ID", "user_id", userID)
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve user"})
-
-		return
+		return httputil.NotFound("User not found")
 	}
 
 	response := UserResponse{
@@ -199,61 +153,41 @@ func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 	}
 
-	h.log.Debug(
-		"User created successfully",
-		"user_email", user.Email,
-		"user_id", user.ID,
-	)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
-// Handles getting all users from database
+// HandleGetAllUsers returns a paginated list of users.
 func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) error {
-	limitQuery := r.URL.Query().Get("limit")
-	offsetQuery := r.URL.Query().Get("offset")
-
 	limit := 10
 	offset := 0
 
-	if limitQuery != "" {
-		if parsedLimit, err := strconv.Atoi(limitQuery); err == nil && parsedLimit > 0 {
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
 			limit = parsedLimit
-			// To prevent abuse
 			if limit > 100 {
 				limit = 100
 			}
 		}
 	}
 
-	if offsetQuery != "" {
-		if parsedOffset, err := strconv.Atoi(offsetQuery); err == nil && parsedOffset >= 0 {
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if parsedOffset, err := strconv.Atoi(offsetStr); err == nil && parsedOffset >= 0 {
 			offset = parsedOffset
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	users, err := h.store.GetAllUsers(ctx, limit, offset)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve users"})
-
 		h.log.Error("Failed to retrieve users", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
-	h.log.Debug(
-		"Got users",
-		"count",
-		len(users),
-	)
+	h.log.Debug("Retrieved users", "count", len(users))
 
+	// Convert to response format
 	userResponses := make([]UserResponse, 0, len(users))
 
 	for _, user := range users {
@@ -273,44 +207,24 @@ func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) erro
 		Offset:     offset,
 	}
 
-	h.log.Debug(
-		"Users retrieved successfully",
-		"count",
-		len(users),
-	)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
-// Handles getting user by it's email
-func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) {
+// HandleGetUserByEmail retrieves a user by their email address (case-insensitive).
+func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) error {
 	email := chi.URLParam(r, "email")
 	if email == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User email is required"})
-
-		return
+		h.log.Debug("email is missing in request", "email", email)
+		return httputil.BadRequest("email is required")
 	}
 
-	h.log.Debug(
-		"Recieved request",
-		"handler", "HandleGetUsersByEmail",
-		"email", email,
-	)
-
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByEmail(ctx, email)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Falied to retrieve user"})
-
-		return
+		h.log.Debug("failed to retrieve user from database", "user", user, "error", err)
+		return httputil.Internal(err)
 	}
 
 	h.log.Debug(
@@ -327,46 +241,23 @@ func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: user.UpdatedAt,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
-// Handles deleting user from database
-func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if id == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User ID is required"})
-
-		return
-	}
-
-	userID, err := uuid.Parse(id)
+// HandleDeleteUser permanently removes a user by their UUID.
+func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) error {
+	userID, err := httputil.ParseUUID(r, "id")
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid User ID format"})
-
-		return
+		return err
 	}
 
-	h.log.Debug(
-		"Received request",
-		"handler", "HandleDeleteUser",
-		"id", userID,
-	)
+	h.log.Debug("Received request", "id", userID)
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	if err := h.store.DeleteUser(ctx, userID); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete user"})
-
-		return
+		return httputil.Internal(err)
 	}
 
 	response := DeleteUserResponse{
@@ -374,34 +265,21 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		ID:      userID,
 	}
 
-	h.log.Debug(
-		"User deleted successfully",
-		"user_id",
-		userID,
-	)
+	h.log.Debug("User deleted successfully", "user_id", userID)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
-// HandleSignup registers a new user and returns JWT tokens
-func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
+// HandleSignup creates a new user account and immediately returns access + refresh JWT tokens.
+func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 	req := new(SignupRequest)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
-
-		return
+	if err := httputil.DecodeJSON(r, req); err != nil {
+		return err
 	}
 
-	h.log.Debug(
-		"Signup attempt",
-		"handler", "HandleSignup",
-		"email", req.Email,
-	)
+	h.log.Debug("Signup attempt", "email", req.Email)
 
+	// Validate request
 	err := validateCreateUserRequest(
 		&CreateUserRequest{
 			Username: req.Username,
@@ -410,78 +288,53 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to validate request"})
-
-		h.log.Error(
-			"Signup validation failed",
-			"email", req.Email,
-			"error", err,
-		)
-
-		return
+		return httputil.BadRequest("Validation failed", map[string]string{
+			"validation_error": err.Error(),
+		})
 	}
 
-	userExist, _ := h.store.GetUserByEmail(r.Context(), strings.ToLower(strings.TrimSpace(req.Email)))
-	if userExist != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User with this email is already exists"})
+	ctx, cancel := h.dbCtx(r)
+	defer cancel()
 
-		return
+	// Check if user exists
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+
+	if existingUser, err := h.store.GetUserByEmail(ctx, email); err != nil {
+		h.log.Debug("Failed to request user by email from database", "email", email, "error", err)
+		return httputil.Internal(err)
+	} else if existingUser != nil {
+		return httputil.BadRequest("User with this email already exists")
 	}
 
+	// Hash password
 	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to process password"})
-
 		h.log.Error("Failed to hash password", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	newUser := &User{
 		Username: req.Username,
-		Email:    strings.ToLower(strings.TrimSpace(req.Email)),
+		Email:    email,
 		Password: string(hashedPassword),
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
-	defer cancel()
-
 	if err := h.store.CreateUser(ctx, newUser); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create user"})
-
 		h.log.Error("Failed to create user", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
+	// Generate tokens
 	accessToken, err := h.authService.GenerateAccessToken(newUser.ID, newUser.Email, newUser.Username)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
-
-		h.log.Error("Failed to generate tokens", "error", err)
-
-		return
+		h.log.Error("Failed to generate access token", "error", err)
+		return httputil.Internal(err)
 	}
 
 	refreshToken, err := h.authService.GenerateRefreshToken(newUser.ID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
-
 		h.log.Error("Failed to generate refresh token", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	response := SignupResponse{
@@ -503,87 +356,51 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		"email", newUser.Email,
 	)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
 // HandleSignin authenticates a user and returns JWT pair of tokens
-func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) error {
 	req := new(SigninRequest)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
-
-		return
+	if err := httputil.DecodeJSON(r, req); err != nil {
+		return err
 	}
 
-	h.log.Debug(
-		"Signin attempt",
-		"handler", "HandleSignin",
-		"email", req.Email,
-	)
+	h.log.Debug("Signin attempt", "email", req.Email)
 
 	if req.Email == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Email is required"})
-
-		return
+		return httputil.BadRequest("Email is required")
 	}
 	if req.Password == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Passowrd is required"})
-
-		return
+		return httputil.BadRequest("Password is required")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
-	user, err := h.store.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(req.Email)))
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	user, err := h.store.GetUserByEmail(ctx, email)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User does not exists"})
-
-		h.log.Warn("Signin failed - user not found", "email", req.Email)
-
-		return
+		h.log.Warn("Signin failed - user not found", "email", email)
+		return httputil.Unauthorized("Invalid email or password")
 	}
 
 	if !password.Verify(req.Password, user.Password) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Email or passowrd is invalid"})
-
-		h.log.Warn("Signin failed - password is invalid", "email", req.Email)
-
-		return
+		h.log.Warn("Signin failed - invalid password", "email", req.Email)
+		return httputil.Unauthorized("Invalid email or password")
 	}
 
+	// Generate tokens
 	accessToken, err := h.authService.GenerateAccessToken(user.ID, user.Email, user.Username)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
-
 		h.log.Error("Failed to generate access token", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	refreshToken, err := h.authService.GenerateRefreshToken(user.ID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
-
 		h.log.Error("Failed to generate refresh token", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	response := SigninResponse{
@@ -605,80 +422,47 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) {
 		"email", user.Email,
 	)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
 // HandleRefreshToken generates new tokens using a refresh token
-func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) error {
 	req := new(RefreshTokenRequest)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
-
-		return
+	if err := httputil.DecodeJSON(r, req); err != nil {
+		return err
 	}
 
-	h.log.Debug(
-		"Token refresh attempt",
-		"handler", "HandleRefreshToken",
-	)
+	h.log.Debug("Token refresh attempt")
 
 	if req.RefreshToken == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Refresh token is required"})
-
-		return
+		return httputil.BadRequest("Refresh token is required")
 	}
 
 	userID, err := h.authService.ValidateRefreshToken(req.RefreshToken)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or expired refresh token"})
-
 		h.log.Debug("Invalid or expired refresh token", "error", err)
-
-		return
+		return httputil.Unauthorized("Refresh token is required")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "User not found"})
-
-		h.log.Error("Failed to get user during token refresh operation", "user_id", userID, "error", err)
-
-		return
+		h.log.Error("User not found during token refresh", "user_id", userID, "error", err)
+		return httputil.NotFound("User not found")
 	}
 
 	newAccessToken, err := h.authService.GenerateAccessToken(userID, user.Email, user.Username)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
-
 		h.log.Error("Failed to generate new access token", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	newRefreshToken, err := h.authService.GenerateRefreshToken(userID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate tokens"})
-
 		h.log.Error("Failed to generate new refresh token", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
 	// Frontend expect this
@@ -695,12 +479,7 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 		TokenType:    "Bearer",
 	}
 
-	h.log.Debug(
-		"Tokens refreshed successfully",
-		"user_id", user.ID,
-	)
+	h.log.Debug("Tokens refreshed successfully", "user_id", user.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
