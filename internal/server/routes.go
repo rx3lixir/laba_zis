@@ -23,37 +23,39 @@ type RouterConfig struct {
 
 func NewRouter(config RouterConfig) *chi.Mux {
 	r := chi.NewRouter()
+	log := config.Log
 
-	// Middleware block
+	// Global middleware
 	r.Use(middleware.RequestID)
+	r.Use(RequestLogger(log))
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
 
 	// CORS middleware
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins: []string{
-			"http://localhost:3000",
-			"https://localhost:3000",
-		},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{
-			"Accept",
-			"Authorization",
-			"Content-Type",
-			"X-Requested-With",
-			"Upgrade",
-			"Connection",
-			"Sec-Websocket-Key",
-			"Sec-Websocket-Version",
-			"Sec-Websocket-Extensions",
-			"Sec-Websocket-Protocol",
-		},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	r.Use(cors.Handler(
+		cors.Options{
+			AllowedOrigins: []string{
+				"http://localhost:3000",
+				"https://localhost:3000",
+			},
+			AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowedHeaders: []string{
+				"Accept",
+				"Authorization",
+				"Content-Type",
+				"X-Requested-With",
+				"Upgrade",
+				"Connection",
+				"Sec-Websocket-Key",
+				"Sec-Websocket-Version",
+				"Sec-Websocket-Extensions",
+				"Sec-Websocket-Protocol",
+			},
+			ExposedHeaders:   []string{"Link"},
+			AllowCredentials: true,
+			MaxAge:           300,
+		}))
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth routes
