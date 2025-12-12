@@ -48,11 +48,8 @@ func main() {
 		"database", c.MainDBParams.Name,
 	)
 
-	// Context to initialize stores
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-
 	// Initializing Postgres connections pool
-	pool, err := postgres.NewPool(ctx, c.MainDBParams.GetDSN())
+	pool, err := postgres.NewPool(context.Background(), c.MainDBParams.GetDSN())
 	if err != nil {
 		log.Error(
 			"failed to create postgres pool",
@@ -81,11 +78,10 @@ func main() {
 	}
 
 	// Making sure it has a bucket that we need
-	if err := s3.EnsureBucket(ctx, minioClient, c.S3Params.BucketName); err != nil {
+	if err := s3.EnsureBucket(context.Background(), minioClient, c.S3Params.BucketName); err != nil {
 		log.Error("failed to ensure bucket exists", "error", err, "bucket", c.S3Params.BucketName)
 		os.Exit(1)
 	}
-	cancel()
 
 	log.Info("minIO client initialized", "bucket", c.S3Params.BucketName)
 
@@ -98,14 +94,14 @@ func main() {
 	// Create auth service
 	authService := auth.NewService(
 		c.GeneralParams.SecretKey,
-		15*time.Minute, // access token
-		7*24*time.Hour, // refresh token
+		time.Duration(c.GeneralParams.AccessTokenTTL)*time.Minute,
+		time.Duration(c.GeneralParams.RefreshTokenTTL)*24*time.Hour,
 	)
 
 	// Creating websocket manager
 	wsManager := websocket.NewConnectionManager(log)
 
-	dbTimeout := time.Duration(c.MainDBParams.Timeout)
+	dbTimeout := time.Duration(c.MainDBParams.Timeout) * time.Second
 
 	// Create Handlers
 	roomHandler := room.NewHandler(roomStore, log, dbTimeout)

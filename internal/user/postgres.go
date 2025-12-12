@@ -101,6 +101,17 @@ func (s *PostgresStore) GetUserByEmail(ctx context.Context, email string) (*User
 	return user, nil
 }
 
+// ExistsByEmail checks whether user exists with passed email and returns true / false
+func (s *PostgresStore) ExistsByEmail(ctx context.Context, email string) (bool, error) {
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`
+	err := s.pool.QueryRow(ctx, query, email).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check if user exists: %w", err)
+	}
+	return exists, nil
+}
+
 // GetAllUsers retrieves all users with pagination from Postgres
 func (s *PostgresStore) GetAllUsers(ctx context.Context, limit, offset int) ([]*User, error) {
 	query := `

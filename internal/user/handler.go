@@ -323,12 +323,15 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 
 	// Check if user exists
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	if existingUser, err := h.store.GetUserByEmail(ctx, email); err != nil {
+
+	userExists, err := h.store.ExistsByEmail(ctx, email)
+	if err != nil {
 		h.log.Error("failed to check existing user",
 			"email", email,
 			"error", err)
 		return httputil.Internal(err)
-	} else if existingUser != nil {
+	}
+	if userExists {
 		h.log.Warn("signup blocked - email already exists",
 			"email", email)
 		return httputil.BadRequest("User with this email already exists")

@@ -3,9 +3,14 @@ package s3
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+)
+
+const (
+	initTimeout = 5 * time.Second
 )
 
 // NewMinIOClient creates a new MinIO client
@@ -22,7 +27,10 @@ func NewClient(endpoint, accessKey, secretKey string, useSSL bool) (*minio.Clien
 }
 
 // EnsureBucket makes sure a bucket exists
-func EnsureBucket(ctx context.Context, client *minio.Client, bucketName string) error {
+func EnsureBucket(parentCtx context.Context, client *minio.Client, bucketName string) error {
+	ctx, cancel := context.WithTimeout(parentCtx, initTimeout)
+	defer cancel()
+
 	exist, err := client.BucketExists(ctx, bucketName)
 	if err != nil {
 		return fmt.Errorf("failed to check whether bucket exist: %w", err)

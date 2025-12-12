@@ -15,8 +15,10 @@ type Config struct {
 }
 
 type GeneralParams struct {
-	Env       string
-	SecretKey string
+	Env             string
+	SecretKey       string
+	AccessTokenTTL  int
+	RefreshTokenTTL int
 }
 
 type HttpServerParams struct {
@@ -75,8 +77,10 @@ func NewConfigManager(configPath string) (*ConfigManager, error) {
 func (cm *ConfigManager) loadConfig() error {
 	cm.config = &Config{
 		GeneralParams: GeneralParams{
-			Env:       cm.v.GetString("general_params.env"),
-			SecretKey: cm.v.GetString("general_params.secret_key"),
+			Env:             cm.v.GetString("general_params.env"),
+			SecretKey:       cm.v.GetString("general_params.secret_key"),
+			AccessTokenTTL:  cm.v.GetInt("general_params.access_token_ttl"),
+			RefreshTokenTTL: cm.v.GetInt("general_params.refresh_token_ttl"),
 		},
 		HttpServerParams: HttpServerParams{
 			Address: cm.v.GetString("http_server_params.http_server_address"),
@@ -131,6 +135,12 @@ func (c *Config) Validate() error {
 	// Checking secret key
 	if c.GeneralParams.SecretKey == "" {
 		return fmt.Errorf("parameter secret_key is required")
+	}
+	if c.GeneralParams.AccessTokenTTL == 0 {
+		return fmt.Errorf("parameter access_token_ttl is required")
+	}
+	if c.GeneralParams.AccessTokenTTL == 0 {
+		return fmt.Errorf("parameter refresh_token is required")
 	}
 
 	// Checking out enviroment variable

@@ -7,6 +7,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	initTimeout = 5 * time.Second
+)
+
 // CreatePostgresPool creates and pings a connection pool
 func NewPool(parentCtx context.Context, dburl string) (*pgxpool.Pool, error) {
 	config, err := pgxpool.ParseConfig(dburl)
@@ -14,15 +18,16 @@ func NewPool(parentCtx context.Context, dburl string) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 
-	config.MaxConns = 5
-	config.MinConns = 2
+	config.MaxConns = 25
+	config.MinConns = 1
 	config.MaxConnLifetime = time.Hour
-	config.MaxConnIdleTime = 30 * time.Minute
+	config.MaxConnIdleTime = 30 * time.Second
 
-	ctx, cancel := context.WithTimeout(parentCtx, time.Second*3)
+	// Timeout for initialization
+	ctx, cancel := context.WithTimeout(parentCtx, initTimeout)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dburl)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, err
 	}
