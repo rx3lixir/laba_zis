@@ -16,7 +16,7 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+	return &PostgresStore{pool}
 }
 
 // CreateVoiceMessage creates a voice message record in the database

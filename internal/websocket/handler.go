@@ -1,76 +1,86 @@
 package websocket
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
+	"github.com/rx3lixir/laba_zis/internal/room"
+	"github.com/rx3lixir/laba_zis/pkg/httputil"
 )
 
 type Handler struct {
-	manager     *Manager
+	connManager *ConnectionManager
 	authService *auth.Service
+	roomStore   room.Store
+	dbTimeout   time.Duration
 	log         *slog.Logger
 }
 
-func NewHandler(wsManager *Manager, authService *auth.Service, log *slog.Logger) *Handler {
-	return &Handler{
-		manager:     wsManager,
-		authService: authService,
-		log:         log,
-	}
+func NewHandler(
+	connManager *ConnectionManager,
+	authService *auth.Service,
+	roomStore room.Store,
+	dbTimeout time.Duration,
+	log *slog.Logger,
+) *Handler {
+	return &Handler{connManager, authService, roomStore, dbTimeout, log}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Get("/", h.HandleConnection)
+	r.Get("/", httputil.Handler(h.HandleConnection, h.log))
 }
 
-func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) {
-	// Get room_id from query params
-	roomIDStr := r.URL.Query().Get("room_id")
-	if roomIDStr == "" {
-		http.Error(w, "room_id parameter required", http.StatusBadRequest)
-		return
-	}
+func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), h.dbTimeout)
+}
 
-	roomID, err := uuid.Parse(roomIDStr)
+func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) error {
+	roomID, err := httputil.ParseUUID(r, "room_id")
 	if err != nil {
-		http.Error(w, "Invalid room_id format", http.StatusBadRequest)
-		return
+		return err
 	}
 
-	// Try to get token from Authorization header first
 	token := r.Header.Get("Authorization")
 	if token != "" {
 		token = strings.TrimPrefix(token, "Bearer ")
 	}
 
-	// If not in header, try query param (for browsers that don't support headers in WebSocket)
 	if token == "" || token == r.Header.Get("Authorization") {
 		token = r.URL.Query().Get("token")
 	}
 
 	if token == "" {
-		http.Error(w, "Missing authorization token", http.StatusUnauthorized)
-		return
+		return httputil.Unauthorized("Missing authorization token")
 	}
 
 	claims, err := h.authService.ValidateAccessToken(token)
 	if err != nil {
-		http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
-		return
+		return httputil.Unauthorized("Invalid or expired token")
 	}
 
-	h.log.Info(
-		"Establishing websocket connection",
+	ctx, cancel := h.dbCtx(r)
+	defer cancel()
+
+	isInRoom, err := h.roomStore.IsUserInRoom(ctx, roomID, claims.UserID)
+	if err != nil || !isInRoom {
+		return httputil.Forbidden("You are not a member of this room")
+	}
+
+	// Upgrade connection
+	if err := h.connManager.HandleConnection(w, r, claims.UserID, roomID); err != nil {
+		h.log.Error("webSocket upgrade failed", "error", err)
+		return httputil.Internal(err)
+	}
+
+	h.log.Info("establishing websocket connection",
 		"user_id", claims.UserID,
 		"room_id", roomID,
-		"username", claims.Username,
-	)
+		"username", claims.Username)
 
-	// Upgrade and register the connection
-	h.manager.ServeWS(w, r, claims.UserID, roomID)
+	return nil
 }

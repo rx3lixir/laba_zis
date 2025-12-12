@@ -29,7 +29,6 @@ func NewHandler(store Store, authService *auth.Service, log *slog.Logger, dbTime
 	return &Handler{store, authService, log, dbTimeout}
 }
 
-// RegisterUserRoutes registers all user-related endpoints under the provided router.
 func (h *Handler) RegisterUserRoutes(r chi.Router) {
 	r.Get("/", httputil.Handler(h.HandleGetAllUsers, h.log))
 	r.Get("/{id}", httputil.Handler(h.HandleGetUserByID, h.log))
@@ -38,14 +37,12 @@ func (h *Handler) RegisterUserRoutes(r chi.Router) {
 	r.Get("/me", httputil.Handler(h.HandleMe, h.log))
 }
 
-// RegisterAuthRoutes registers authentication-related endpoints (signup, signin refresh).
 func (h *Handler) RegisterAuthRoutes(r chi.Router) {
 	r.Post("/signup", httputil.Handler(h.HandleSignup, h.log))
 	r.Post("/signin", httputil.Handler(h.HandleSignin, h.log))
 	r.Post("/refresh", httputil.Handler(h.HandleRefreshToken, h.log))
 }
 
-// Context that handles database requests
 func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), h.dbTimeout)
 }
@@ -54,14 +51,21 @@ func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
 func (h *Handler) HandleMe(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
 	if userID == uuid.Nil {
+		h.log.Debug("me endpoint accessed without authentication")
 		return httputil.Unauthorized("User ID is invalid")
 	}
+
+	h.log.Debug("get current user request",
+		"user_id", userID)
 
 	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
+		h.log.Error("failed to retrieve current user from database",
+			"user_id", userID,
+			"error", err)
 		return httputil.NotFound("User not found")
 	}
 
@@ -81,20 +85,23 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	h.log.Debug("recieved request", "email", req.Email)
+	h.log.Debug("create user request received",
+		"email", req.Email,
+		"username", req.Username)
 
 	if err := validateCreateUserRequest(req); err != nil {
-		h.log.Error(
-			"User validation failed",
-			"user_email", req.Email,
-			"error", err,
-		)
-		return httputil.Internal(err)
+		h.log.Debug("user validation failed",
+			"email", req.Email,
+			"error", err)
+		return httputil.BadRequest("Validation failed", map[string]string{
+			"validation_error": err.Error(),
+		})
 	}
 
 	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
-		h.log.Error("Failed to hash passoword", "error", err)
+		h.log.Error("failed to hash password",
+			"error", err)
 		return httputil.Internal(err)
 	}
 
@@ -108,9 +115,16 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) error
 	defer cancel()
 
 	if err := h.store.CreateUser(ctx, newUser); err != nil {
-		h.log.Error("Failed to create user", "error", err)
+		h.log.Error("failed to create user in database",
+			"email", newUser.Email,
+			"error", err)
 		return httputil.Internal(err)
 	}
+
+	h.log.Info("user created successfully",
+		"user_id", newUser.ID,
+		"email", newUser.Email,
+		"username", newUser.Username)
 
 	response := CreateUserResponse{
 		ID:        newUser.ID,
@@ -118,12 +132,6 @@ func (h *Handler) HandleCreateUser(w http.ResponseWriter, r *http.Request) error
 		Email:     newUser.Email,
 		CreatedAt: newUser.CreatedAt,
 	}
-
-	h.log.Debug(
-		"User created",
-		"user_email", newUser.Email,
-		"user_id", newUser.ID,
-	)
 
 	return httputil.RespondJSON(w, http.StatusOK, response)
 }
@@ -135,13 +143,17 @@ func (h *Handler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 
-	h.log.Debug("Fetching user by ID", "user_id", userID)
+	h.log.Debug("get user by ID request",
+		"user_id", userID)
 
 	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
+		h.log.Debug("user not found",
+			"user_id", userID,
+			"error", err)
 		return httputil.NotFound("User not found")
 	}
 
@@ -176,20 +188,22 @@ func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) erro
 		}
 	}
 
+	h.log.Debug("get all users request",
+		"limit", limit,
+		"offset", offset)
+
 	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	users, err := h.store.GetAllUsers(ctx, limit, offset)
 	if err != nil {
-		h.log.Error("Failed to retrieve users", "error", err)
+		h.log.Error("failed to retrieve users from database",
+			"error", err)
 		return httputil.Internal(err)
 	}
 
-	h.log.Debug("Retrieved users", "count", len(users))
-
 	// Convert to response format
 	userResponses := make([]UserResponse, 0, len(users))
-
 	for _, user := range users {
 		userResponses = append(userResponses, UserResponse{
 			ID:        user.ID,
@@ -199,6 +213,9 @@ func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) erro
 			UpdatedAt: user.UpdatedAt,
 		})
 	}
+
+	h.log.Debug("users retrieved",
+		"count", len(users))
 
 	response := GetAllUsersResponse{
 		Users:      userResponses,
@@ -214,24 +231,22 @@ func (h *Handler) HandleGetAllUsers(w http.ResponseWriter, r *http.Request) erro
 func (h *Handler) HandleGetUserByEmail(w http.ResponseWriter, r *http.Request) error {
 	email := chi.URLParam(r, "email")
 	if email == "" {
-		h.log.Debug("email is missing in request", "email", email)
 		return httputil.BadRequest("email is required")
 	}
+
+	h.log.Debug("get user by email request",
+		"email", email)
 
 	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	user, err := h.store.GetUserByEmail(ctx, email)
 	if err != nil {
-		h.log.Debug("failed to retrieve user from database", "user", user, "error", err)
-		return httputil.Internal(err)
+		h.log.Debug("user not found by email",
+			"email", email,
+			"error", err)
+		return httputil.NotFound("User not found")
 	}
-
-	h.log.Debug(
-		"Retrieved user from database",
-		"username", user.Username,
-		"email", user.Email,
-	)
 
 	response := UserResponse{
 		ID:        user.ID,
@@ -251,21 +266,26 @@ func (h *Handler) HandleDeleteUser(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	h.log.Debug("Received request", "id", userID)
+	h.log.Debug("delete user request",
+		"user_id", userID)
 
 	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	if err := h.store.DeleteUser(ctx, userID); err != nil {
+		h.log.Error("failed to delete user from database",
+			"user_id", userID,
+			"error", err)
 		return httputil.Internal(err)
 	}
+
+	h.log.Info("user deleted successfully",
+		"user_id", userID)
 
 	response := DeleteUserResponse{
 		Message: "User deleted successfully",
 		ID:      userID,
 	}
-
-	h.log.Debug("User deleted successfully", "user_id", userID)
 
 	return httputil.RespondJSON(w, http.StatusOK, response)
 }
@@ -277,7 +297,9 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	h.log.Debug("Signup attempt", "email", req.Email)
+	h.log.Debug("signup request received",
+		"email", req.Email,
+		"username", req.Username)
 
 	// Validate request
 	err := validateCreateUserRequest(
@@ -288,6 +310,9 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 		},
 	)
 	if err != nil {
+		h.log.Debug("signup validation failed",
+			"email", req.Email,
+			"error", err)
 		return httputil.BadRequest("Validation failed", map[string]string{
 			"validation_error": err.Error(),
 		})
@@ -298,18 +323,22 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 
 	// Check if user exists
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-
 	if existingUser, err := h.store.GetUserByEmail(ctx, email); err != nil {
-		h.log.Debug("Failed to request user by email from database", "email", email, "error", err)
+		h.log.Error("failed to check existing user",
+			"email", email,
+			"error", err)
 		return httputil.Internal(err)
 	} else if existingUser != nil {
+		h.log.Warn("signup blocked - email already exists",
+			"email", email)
 		return httputil.BadRequest("User with this email already exists")
 	}
 
 	// Hash password
 	hashedPassword, err := password.Hash(req.Password)
 	if err != nil {
-		h.log.Error("Failed to hash password", "error", err)
+		h.log.Error("failed to hash password during signup",
+			"error", err)
 		return httputil.Internal(err)
 	}
 
@@ -320,22 +349,33 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if err := h.store.CreateUser(ctx, newUser); err != nil {
-		h.log.Error("Failed to create user", "error", err)
+		h.log.Error("failed to create user during signup",
+			"email", email,
+			"error", err)
 		return httputil.Internal(err)
 	}
 
 	// Generate tokens
 	accessToken, err := h.authService.GenerateAccessToken(newUser.ID, newUser.Email, newUser.Username)
 	if err != nil {
-		h.log.Error("Failed to generate access token", "error", err)
+		h.log.Error("failed to generate access token",
+			"user_id", newUser.ID,
+			"error", err)
 		return httputil.Internal(err)
 	}
 
 	refreshToken, err := h.authService.GenerateRefreshToken(newUser.ID)
 	if err != nil {
-		h.log.Error("Failed to generate refresh token", "error", err)
+		h.log.Error("failed to generate refresh token",
+			"user_id", newUser.ID,
+			"error", err)
 		return httputil.Internal(err)
 	}
+
+	h.log.Info("user signed up successfully",
+		"user_id", newUser.ID,
+		"email", newUser.Email,
+		"username", newUser.Username)
 
 	response := SignupResponse{
 		User: UserResponse{
@@ -350,12 +390,6 @@ func (h *Handler) HandleSignup(w http.ResponseWriter, r *http.Request) error {
 		TokenType:    "Bearer",
 	}
 
-	h.log.Debug(
-		"User signed up successfully",
-		"user_id", newUser.ID,
-		"email", newUser.Email,
-	)
-
 	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
@@ -366,7 +400,8 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	h.log.Debug("Signin attempt", "email", req.Email)
+	h.log.Debug("signin request received",
+		"email", req.Email)
 
 	if req.Email == "" {
 		return httputil.BadRequest("Email is required")
@@ -381,27 +416,38 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) error {
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 	user, err := h.store.GetUserByEmail(ctx, email)
 	if err != nil {
-		h.log.Warn("Signin failed - user not found", "email", email)
+		h.log.Warn("signin failed - user not found",
+			"email", email)
 		return httputil.Unauthorized("Invalid email or password")
 	}
 
 	if !password.Verify(req.Password, user.Password) {
-		h.log.Warn("Signin failed - invalid password", "email", req.Email)
+		h.log.Warn("signin failed - invalid password",
+			"email", email,
+			"user_id", user.ID)
 		return httputil.Unauthorized("Invalid email or password")
 	}
 
 	// Generate tokens
 	accessToken, err := h.authService.GenerateAccessToken(user.ID, user.Email, user.Username)
 	if err != nil {
-		h.log.Error("Failed to generate access token", "error", err)
+		h.log.Error("failed to generate access token",
+			"user_id", user.ID,
+			"error", err)
 		return httputil.Internal(err)
 	}
 
 	refreshToken, err := h.authService.GenerateRefreshToken(user.ID)
 	if err != nil {
-		h.log.Error("Failed to generate refresh token", "error", err)
+		h.log.Error("failed to generate refresh token",
+			"user_id", user.ID,
+			"error", err)
 		return httputil.Internal(err)
 	}
+
+	h.log.Info("user signed in successfully",
+		"user_id", user.ID,
+		"email", user.Email)
 
 	response := SigninResponse{
 		User: UserResponse{
@@ -416,12 +462,6 @@ func (h *Handler) HandleSignin(w http.ResponseWriter, r *http.Request) error {
 		TokenType:    "Bearer",
 	}
 
-	h.log.Debug(
-		"User signed in successfully",
-		"user_id", user.ID,
-		"email", user.Email,
-	)
-
 	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
@@ -432,7 +472,7 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 
-	h.log.Debug("Token refresh attempt")
+	h.log.Debug("token refresh request received")
 
 	if req.RefreshToken == "" {
 		return httputil.BadRequest("Refresh token is required")
@@ -440,8 +480,9 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) err
 
 	userID, err := h.authService.ValidateRefreshToken(req.RefreshToken)
 	if err != nil {
-		h.log.Debug("Invalid or expired refresh token", "error", err)
-		return httputil.Unauthorized("Refresh token is required")
+		h.log.Warn("token refresh failed - invalid token",
+			"error", err)
+		return httputil.Unauthorized("Invalid or expired refresh token")
 	}
 
 	ctx, cancel := h.dbCtx(r)
@@ -449,23 +490,31 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) err
 
 	user, err := h.store.GetUserByID(ctx, userID)
 	if err != nil {
-		h.log.Error("User not found during token refresh", "user_id", userID, "error", err)
+		h.log.Error("token refresh failed - user not found",
+			"user_id", userID,
+			"error", err)
 		return httputil.NotFound("User not found")
 	}
 
 	newAccessToken, err := h.authService.GenerateAccessToken(userID, user.Email, user.Username)
 	if err != nil {
-		h.log.Error("Failed to generate new access token", "error", err)
+		h.log.Error("failed to generate new access token",
+			"user_id", userID,
+			"error", err)
 		return httputil.Internal(err)
 	}
 
 	newRefreshToken, err := h.authService.GenerateRefreshToken(userID)
 	if err != nil {
-		h.log.Error("Failed to generate new refresh token", "error", err)
+		h.log.Error("failed to generate new refresh token",
+			"user_id", userID,
+			"error", err)
 		return httputil.Internal(err)
 	}
 
-	// Frontend expect this
+	h.log.Info("tokens refreshed successfully",
+		"user_id", user.ID)
+
 	response := SigninResponse{
 		User: UserResponse{
 			ID:        user.ID,
@@ -478,8 +527,6 @@ func (h *Handler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) err
 		RefreshToken: newRefreshToken,
 		TokenType:    "Bearer",
 	}
-
-	h.log.Debug("Tokens refreshed successfully", "user_id", user.ID)
 
 	return httputil.RespondJSON(w, http.StatusOK, response)
 }

@@ -1,25 +1,46 @@
 package websocket
 
-import "github.com/google/uuid"
+import (
+	"encoding/json"
 
-type EventType string
-
-const (
-	EventNewVoiceMessage EventType = "new_voice_message"
-	EventUserJoined      EventType = "user_joined"
-	EventUserLeft        EventType = "user_left"
+	"github.com/google/uuid"
 )
 
-type Event struct {
-	Type EventType `json:"type"`
-	Data any       `json:"data"`
+// MessageType defines the type of message
+type MessageType string
+
+const (
+	// Client -> Server
+	TypePing        MessageType = "ping"
+	TypeTyping      MessageType = "typing"
+	TypeReadReceipt MessageType = "read_receipt"
+
+	// Server -> Client
+	TypePong            MessageType = "pong"
+	TypeNewVoiceMessage MessageType = "new_voice_message"
+	TypeUserJoined      MessageType = "user_joined"
+	TypeUserLeft        MessageType = "user_left"
+	TypeError           MessageType = "error"
+	TypeConnectionAck   MessageType = "connection_ack"
+)
+
+// ClientMessage represents any message from client
+type ClientMessage struct {
+	Type MessageType     `json:"type"`
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
-type NewVoiceMessageEvent struct {
+// ServerMessage represents any message to client
+type ServerMessage struct {
+	Type      MessageType `json:"type"`
+	Data      any         `json:"data,omitempty"`
+	Timestamp int64       `json:"timestamp"`
+}
+
+// VoiceMessageData is the payload for new voice messages
+type VoiceMessageData struct {
 	MessageID uuid.UUID `json:"message_id"`
-	RoomID    uuid.UUID `json:"room_id"`
 	SenderID  uuid.UUID `json:"sender_id"`
-	Duration  int       `json:"duration_seconds"`
+	Duration  int       `json:"duration"`
 	URL       string    `json:"url"`
-	CreatedAt int64     `json:"created_at"`
 }

@@ -3,7 +3,6 @@ package websocket
 import (
 	"encoding/json"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,121 +10,144 @@ import (
 )
 
 const (
-	// Time allowed to write a message to the peer
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period (must be less than pongWait)
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer
-	maxMessageSize = 512
+	writeWait      = 10 * time.Second
+	pongWait       = 60 * time.Second
+	pingPeriod     = (pongWait * 9) / 10
+	maxMessageSize = 8192 // 8KB for JSON messages
 )
 
-// Client represents a single websocket connection
 type Client struct {
-	manager    *Manager
-	connection *websocket.Conn
-	userID     uuid.UUID
-	roomID     uuid.UUID
-	egress     chan []byte
-	log        *slog.Logger
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
+	userID uuid.UUID
+	log    *slog.Logger
 }
 
-type ClientList map[*Client]bool
-
-type roomClients struct {
-	sync.RWMutex
-	clients map[uuid.UUID]ClientList
-}
-
-// NewClient creates a new websocket client
-func NewClient(conn *websocket.Conn, manager *Manager, userID, roomID uuid.UUID, log *slog.Logger) *Client {
+func NewClient(hub *Hub, conn *websocket.Conn, userID uuid.UUID, log *slog.Logger) *Client {
 	return &Client{
-		connection: conn,
-		manager:    manager,
-		userID:     userID,
-		roomID:     roomID,
-		egress:     make(chan []byte, 256),
-		log:        log,
+		hub:    hub,
+		conn:   conn,
+		send:   make(chan []byte, 256),
+		userID: userID,
+		log:    log,
 	}
 }
 
-// readMessages pumps messages from the websocket connection to the manager
-func (c *Client) readMessages() {
+func (c *Client) SendMessage(msg ServerMessage) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		c.log.Error("failed to marshal message", "error", err)
+		return
+	}
+
+	select {
+	case c.send <- data:
+	default:
+		c.log.Warn("client send buffer full", "user_id", c.userID)
+	}
+}
+
+// readPump pumps messages from WebSocket to hub
+func (c *Client) readPump() {
 	defer func() {
-		c.manager.RemoveClient(c)
-		c.connection.Close()
+		c.hub.unregister <- c
+		c.conn.Close()
 	}()
 
-	c.connection.SetReadDeadline(time.Now().Add(pongWait))
-	c.connection.SetPongHandler(func(string) error {
-		c.connection.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetReadLimit(maxMessageSize)
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(appData string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
-	c.connection.SetReadLimit(maxMessageSize)
 
 	for {
-		_, msg, err := c.connection.ReadMessage()
+		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.log.Error("Unexpected websocket close", "error", err, "user_id", c.userID, "room_id", c.roomID)
+			if websocket.IsUnexpectedCloseError(err,
+				websocket.CloseGoingAway,
+				websocket.CloseAbnormalClosure) {
+				c.log.Error("WebSocket error", "error", err, "user_id", c.userID)
 			}
 			break
 		}
-
-		var message struct {
-			Type string `json:"type"`
-		}
-
-		if err := json.Unmarshal(msg, &message); err != nil {
-			c.log.Warn("Failed to parse message", "error", err)
+		// Parse and handle client message
+		var clientMsg ClientMessage
+		if err := json.Unmarshal(message, &clientMsg); err != nil {
+			c.log.Warn("Invalid message format", "error", err, "user_id", c.userID)
+			c.sendError("Invalid message format")
 			continue
 		}
-
-		// Handle ping/pong
-		if message.Type == "ping" {
-			response := Event{Type: "pong", Data: map[string]int64{"timestamp": time.Now().Unix()}}
-			data, _ := json.Marshal(response)
-			c.egress <- data
-		}
-
-		// Can be extended with typing, read receipts, etc.
+		c.handleClientMessage(clientMsg)
 	}
 }
 
-// writeMessages pumps messages from the manager to the websocket connection
-func (c *Client) writeMessages() {
+// writePump pumps messages from hub to WebSocket
+func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.connection.Close()
+		c.conn.Close()
 	}()
 
 	for {
 		select {
-		case message, ok := <-c.egress:
-			c.connection.SetWriteDeadline(time.Now().Add(writeWait))
+		case message, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// Manager closed the channel
-				c.connection.WriteMessage(websocket.CloseMessage, []byte{})
+				// Hub closed the channel
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			if err := c.connection.WriteMessage(websocket.TextMessage, message); err != nil {
-				c.log.Error("Failed to write message", "error", err, "user_id", c.userID)
+			w, err := c.conn.NextWriter(websocket.TextMessage)
+			if err != nil {
 				return
 			}
+			w.Write(message)
 
-			c.log.Debug("Message sent to client", "user_id", c.userID, "room_id", c.roomID)
+			// Add queued messages to current websocket frame (optimization)
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				w.Write([]byte{'\n'})
+				w.Write(<-c.send)
+			}
+
+			if err := w.Close(); err != nil {
+				return
+			}
 
 		case <-ticker.C:
-			c.connection.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.connection.WriteMessage(websocket.PingMessage, nil); err != nil {
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
 	}
+}
+
+func (c *Client) handleClientMessage(msg ClientMessage) {
+	switch msg.Type {
+	case TypePing:
+		c.SendMessage(ServerMessage{Type: TypePong})
+
+	case TypeTyping:
+		// Could broadcast typing indicators
+		c.log.Debug("user typing", "user_id", c.userID)
+
+	case TypeReadReceipt:
+		// Handle read receipts
+		c.log.Debug("Read receipt", "user_id", c.userID)
+
+	default:
+		c.log.Warn("Unknown message type", "type", msg.Type, "user_id", c.userID)
+	}
+}
+
+func (c *Client) sendError(message string) {
+	c.SendMessage(ServerMessage{
+		Type: TypeError,
+		Data: map[string]string{"error": message},
+	})
 }

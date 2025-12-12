@@ -16,7 +16,7 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+	return &PostgresStore{pool}
 }
 
 // CreateUser creates a new user in Postgres

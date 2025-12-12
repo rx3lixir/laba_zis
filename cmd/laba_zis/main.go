@@ -24,14 +24,14 @@ func main() {
 	// Creating and validating config
 	cm, err := config.NewConfigManager("internal/config/config.yaml")
 	if err != nil {
-		fmt.Printf("Error getting config file: %v", err)
+		fmt.Printf("error getting config file: %v", err)
 		os.Exit(1)
 	}
 
 	c := cm.GetConfig()
 
 	if err := c.Validate(); err != nil {
-		fmt.Printf("Invalid configuration: %v", err)
+		fmt.Printf("invalid configuration: %v", err)
 		os.Exit(1)
 	}
 
@@ -42,20 +42,20 @@ func main() {
 	})
 
 	log.Info(
-		"Configuration loaded",
+		"configuration loaded",
 		"env", c.GeneralParams.Env,
 		"http_server_address", c.HttpServerParams.GetAddress(),
 		"database", c.MainDBParams.Name,
 	)
 
 	// Context to initialize stores
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 
 	// Initializing Postgres connections pool
 	pool, err := postgres.NewPool(ctx, c.MainDBParams.GetDSN())
 	if err != nil {
 		log.Error(
-			"Failed to create postgres pool",
+			"failed to create postgres pool",
 			"error", err,
 			"db", c.MainDBParams.Name,
 		)
@@ -64,7 +64,7 @@ func main() {
 	defer pool.Close()
 
 	log.Info(
-		"Database connection established",
+		"database connection established",
 		"db", c.MainDBParams.GetDSN(),
 	)
 
@@ -76,22 +76,18 @@ func main() {
 		c.S3Params.UseSSL,
 	)
 	if err != nil {
-		log.Error("Failed to create MinIO client", "error", err)
+		log.Error("failed to create MinIO client", "error", err)
 		os.Exit(1)
 	}
 
 	// Making sure it has a bucket that we need
 	if err := s3.EnsureBucket(ctx, minioClient, c.S3Params.BucketName); err != nil {
-		log.Error("Failed to ensure bucket exists", "error", err, "bucket", c.S3Params.BucketName)
+		log.Error("failed to ensure bucket exists", "error", err, "bucket", c.S3Params.BucketName)
 		os.Exit(1)
 	}
-
-	// Sleeping for storates to clean up
-	time.Sleep(time.Second * 1)
-
 	cancel()
 
-	log.Info("MinIO client initialized", "bucket", c.S3Params.BucketName)
+	log.Info("minIO client initialized", "bucket", c.S3Params.BucketName)
 
 	// Create stores
 	userStore := user.NewPostgresStore(pool)
@@ -107,18 +103,21 @@ func main() {
 	)
 
 	// Creating websocket manager
-	wsManager := websocket.NewManager(log)
+	wsManager := websocket.NewConnectionManager(log)
+
+	dbTimeout := time.Duration(c.MainDBParams.Timeout)
 
 	// Create Handlers
-	roomHandler := room.NewHandler(roomStore, log)
-	userHandler := user.NewHandler(userStore, authService, log)
-	wsHandler := websocket.NewHandler(wsManager, authService, log)
+	roomHandler := room.NewHandler(roomStore, log, dbTimeout)
+	userHandler := user.NewHandler(userStore, authService, log, dbTimeout)
+	wsHandler := websocket.NewHandler(wsManager, authService, roomStore, dbTimeout, log)
 	voiceHandler := voice.NewHandler(
 		voiceMessageDBStore,
 		voiceMessageFileStore,
 		roomStore,
 		wsManager,
 		log,
+		dbTimeout,
 	)
 
 	// Setup router
@@ -146,20 +145,20 @@ func main() {
 
 	select {
 	case err := <-serverErrors:
-		log.Error("Server error", "error", err)
+		log.Error("server error", "error", err)
 		os.Exit(1)
 
 	case sig := <-shutdown:
-		log.Info("Shutdown signal received", "signal", sig)
+		log.Info("shutdown signal received", "signal", sig)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Error("Graceful shutdown failed", "error", err)
+			log.Error("graceful shutdown failed", "error", err)
 			os.Exit(1)
 		}
 
-		log.Info("Server stopped")
+		log.Info("server stopped")
 	}
 }

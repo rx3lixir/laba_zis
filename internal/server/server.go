@@ -26,12 +26,11 @@ func New(addr string, handler http.Handler, log *slog.Logger) *Server {
 }
 
 func (s *Server) Start() error {
-	s.log.Info("starting http server", "addr", s.httpServer.Addr)
-	// return s.httpServer.ListenAndServeTLS("internal/server/cert.pem", "internal/server/key.pem")
+	s.log.Info("starting http server...", "addr", s.httpServer.Addr)
 	return s.httpServer.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.log.Info("shutting down server")
+	s.log.Info("shutting down server...")
 	return s.httpServer.Shutdown(ctx)
 }

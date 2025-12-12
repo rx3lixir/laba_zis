@@ -1,7 +1,6 @@
 package websocket
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -10,100 +9,90 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var websocketUpgrader = websocket.Upgrader{
+var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		return true // tighten in prod!
 	},
 }
 
-type Manager struct {
-	clients   ClientList
-	roomIndex map[uuid.UUID]ClientList
-	sync.RWMutex
-	log *slog.Logger
+type ConnectionManager struct {
+	hubs sync.Map // map[uuid.UUID]*Hub
+	log  *slog.Logger
 }
 
-func NewManager(log *slog.Logger) *Manager {
-	return &Manager{
-		clients:   make(ClientList),
-		roomIndex: make(map[uuid.UUID]ClientList),
-		log:       log,
+func NewConnectionManager(log *slog.Logger) *ConnectionManager {
+	return &ConnectionManager{log: log}
+}
+
+// GetOrCreateHub returns existing hub or creates new one
+func (cm *ConnectionManager) GetOrCreateHub(roomID uuid.UUID) *Hub {
+	if hub, ok := cm.hubs.Load(roomID); ok {
+		return hub.(*Hub)
+	}
+
+	hub := NewHub(roomID, cm.log)
+	actual, loaded := cm.hubs.LoadOrStore(roomID, hub)
+
+	if !loaded {
+		// We created a new hub, start it
+		go hub.Run()
+		cm.log.Info("Created new hub", "room_id", roomID)
+	}
+
+	return actual.(*Hub)
+}
+
+// BroadcastToRoom sends message to all clients in a room
+func (cm *ConnectionManager) BroadcastToRoom(roomID uuid.UUID, message ServerMessage) {
+	if hub, ok := cm.hubs.Load(roomID); ok {
+		hub.(*Hub).Send(message)
 	}
 }
 
-// AddClient registers client and indexes by room
-func (m *Manager) AddClient(client *Client) {
-	m.Lock()
-	defer m.Unlock()
-
-	m.clients[client] = true
-
-	if _, exists := m.roomIndex[client.roomID]; !exists {
-		m.roomIndex[client.roomID] = make(ClientList)
-	}
-	m.roomIndex[client.roomID][client] = true
-
-	m.log.Debug("Client connected", "user_id", client.userID, "room_id", client.roomID)
-}
-
-// RemoveClient removes from both global and room index
-func (m *Manager) RemoveClient(client *Client) {
-	m.Lock()
-	defer m.Unlock()
-
-	if _, ok := m.clients[client]; ok {
-		client.connection.Close()
-		delete(m.clients, client)
-	}
-
-	if roomClients, ok := m.roomIndex[client.roomID]; ok {
-		delete(roomClients, client)
-		if len(roomClients) == 0 {
-			delete(m.roomIndex, client.roomID)
-		}
-	}
-
-	m.log.Debug("Client disconnected", "user_id", client.userID, "room_id", client.roomID)
-}
-
-func (m *Manager) BroadcastToRoom(roomID uuid.UUID, event Event) {
-	data, err := json.Marshal(event)
+// HandleConnection upgrades HTTP to WebSocket
+func (cm *ConnectionManager) HandleConnection(
+	w http.ResponseWriter,
+	r *http.Request,
+	userID uuid.UUID,
+	roomID uuid.UUID,
+) error {
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		return
+		return err
 	}
 
-	m.RLock()
-	defer m.RUnlock()
+	hub := cm.GetOrCreateHub(roomID)
+	client := NewClient(hub, conn, userID, cm.log)
 
-	clients, exists := m.roomIndex[roomID]
-	if !exists {
-		return
-	}
+	// Register with hub
+	hub.register <- client
 
-	for client := range clients {
-		select {
-		case client.egress <- data:
-		default:
-			m.log.Warn("Dropping message for slow client", "user_id", client.userID)
-		}
-	}
+	// Start client pumps
+	go client.writePump()
+	go client.readPump()
+
+	return nil
 }
 
-func (m *Manager) ServeWS(w http.ResponseWriter, r *http.Request, userID, roomID uuid.UUID) {
-	m.log.Info("Upgrading WebSocket connection", "user_id", userID, "room_id", roomID)
+// Shutdown gracefully shuts down all hubs
+func (cm *ConnectionManager) Shutdown() {
+	cm.hubs.Range(func(key, value any) bool {
+		hub := value.(*Hub)
+		hub.Shutdown()
+		return true
+	})
+}
 
-	conn, err := websocketUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		m.log.Error("Failed to upgrade WebSocket", "error", err)
-		http.Error(w, "Failed to upgrade", http.StatusBadRequest)
-		return
-	}
-
-	client := NewClient(conn, m, userID, roomID, m.log)
-	m.AddClient(client)
-
-	go client.readMessages()
-	go client.writeMessages()
+// GetMetrics returns metrics for monitoring
+func (cm *ConnectionManager) GetMetrics() map[uuid.UUID]*HubMetrics {
+	metrics := make(map[uuid.UUID]*HubMetrics)
+	cm.hubs.Range(func(key, value any) bool {
+		roomID := key.(uuid.UUID)
+		hub := value.(*Hub)
+		metrics[roomID] = hub.metrics
+		return true
+	})
+	return metrics
 }

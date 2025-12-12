@@ -2,7 +2,6 @@ package voice
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,8 +11,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
+	"github.com/rx3lixir/laba_zis/internal/room"
 	"github.com/rx3lixir/laba_zis/internal/websocket"
 	"github.com/rx3lixir/laba_zis/pkg/audio"
+	"github.com/rx3lixir/laba_zis/pkg/httputil"
 )
 
 const (
@@ -27,212 +28,219 @@ const (
 type Handler struct {
 	dbStore   VoiceMessageDBStore
 	fileStore VoiceMessageStore
-	roomStore RoomStore // We need to check if user is in room
-	wsManager *websocket.Manager
+	roomStore room.Store
+	wsManager *websocket.ConnectionManager
 	log       *slog.Logger
-}
-
-// RoomStore is a minimal interface for room verification
-type RoomStore interface {
-	IsUserInRoom(ctx context.Context, roomID, userID uuid.UUID) (bool, error)
+	dbTimeout time.Duration
 }
 
 func NewHandler(
 	dbStore VoiceMessageDBStore,
 	fileStore VoiceMessageStore,
-	roomStore RoomStore,
-	wsManager *websocket.Manager,
+	roomStore room.Store,
+	wsManager *websocket.ConnectionManager,
 	log *slog.Logger,
+	dbTimeout time.Duration,
 ) *Handler {
 	return &Handler{
-		dbStore:   dbStore,
-		fileStore: fileStore,
-		roomStore: roomStore,
-		wsManager: wsManager,
-		log:       log,
+		dbStore,
+		fileStore,
+		roomStore,
+		wsManager,
+		log,
+		dbTimeout,
 	}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Post("/", h.HandleUploadVoiceMessage)
-	r.Get("/room/{roomID}", h.HandleGetRoomMessages)
-	r.Get("/{messageID}", h.HandleGetVoiceMessage)
-	r.Delete("/{messageID}", h.HandleDeleteVoiceMessage)
+	r.Post("/", httputil.Handler(h.HandleUploadVoiceMessage, h.log))
+	r.Get("/room/{roomID}", httputil.Handler(h.HandleGetRoomMessages, h.log))
+	r.Get("/{messageID}", httputil.Handler(h.HandleGetVoiceMessage, h.log))
+	r.Delete("/{messageID}", httputil.Handler(h.HandleDeleteVoiceMessage, h.log))
 }
 
-func writeJson(w http.ResponseWriter, status int, response any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(response)
-}
-
-func writeError(w http.ResponseWriter, status int, error string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": error})
+func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), h.dbTimeout)
 }
 
 // HandleUploadVoiceMessage uploads a voice message to S3 and creates a DB record
-func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Request) error {
+	// Extract user from context
 	senderID := auth.GetUserID(r.Context())
 	if senderID == uuid.Nil {
-		writeError(w, http.StatusUnauthorized, "Unauthorized")
-		return
+		h.log.Debug("voice message upload attempt without authentication")
+		return httputil.Unauthorized("Unauthorized")
 	}
 
-	// Parse multipart form with size limit
+	// Parse multipart form
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-		writeError(w, http.StatusUnauthorized, "File too large or data is invalid")
-		return
+		h.log.Debug("failed to parse multipart form",
+			"sender_id", senderID,
+			"error", err)
+		return httputil.BadRequest("Invalid multipart form data")
 	}
 
-	// Get room_id and duration from form
+	// Extract and validate parameters
 	roomIDStr := r.FormValue("room_id")
 	durationStr := r.FormValue("duration_seconds")
 
+	h.log.Debug("voice message upload request received",
+		"sender_id", senderID,
+		"room_id", roomIDStr,
+		"duration", durationStr)
+
 	if roomIDStr == "" || durationStr == "" {
-		writeError(w, http.StatusBadRequest, "room_id and duration_seconds required")
-		return
+		return httputil.BadRequest("room_id and duration_seconds parameters required")
 	}
 
 	roomID, err := uuid.Parse(roomIDStr)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid room_id format")
-		return
+		return httputil.BadRequest("Invalid room_id format")
 	}
 
 	duration, err := strconv.Atoi(durationStr)
 	if err != nil || duration <= 0 || duration > maxDuration {
-		writeError(w, http.StatusBadRequest, "duration_seconds must be between 1 and 15")
-		return
+		return httputil.BadRequest("duration_seconds must be between 1 and 15")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*10)
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Verify user is in the room
 	isInRoom, err := h.roomStore.IsUserInRoom(ctx, roomID, senderID)
-	if err != nil || !isInRoom {
-		writeJson(w, http.StatusForbidden, "You are not a member of this room")
-		return
+	if err != nil {
+		h.log.Error("failed to verify room membership",
+			"sender_id", senderID,
+			"room_id", roomID,
+			"error", err)
+		return httputil.Internal(err)
+	}
+	if !isInRoom {
+		h.log.Warn("voice message upload blocked - user not in room",
+			"sender_id", senderID,
+			"room_id", roomID)
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	// Get the audio file from form
 	fileHandler, fileHeader, err := r.FormFile("audio")
 	if err != nil {
-		writeJson(w, http.StatusBadRequest, "Audio file is required")
-		return
+		return httputil.BadRequest("Audio file is required")
 	}
 	defer fileHandler.Close()
 
 	// Read file data
 	data, err := io.ReadAll(fileHandler)
 	if err != nil {
-		writeJson(w, http.StatusInternalServerError, "Failed to read audio file")
-		h.log.Error("Failed to read uploaded file", "error", err)
-		return
+		h.log.Error("failed to read uploaded audio file",
+			"sender_id", senderID,
+			"room_id", roomID,
+			"error", err)
+		return httputil.Internal(err)
 	}
 
 	if len(data) == 0 {
-		writeJson(w, http.StatusBadRequest, "Empty audio file")
-		return
+		return httputil.BadRequest("Empty audio file")
 	}
 
-	// Determine audio format from content type or filename
+	// Detect audio format
 	contentType := fileHeader.Header.Get("Content-Type")
 	filename := fileHeader.Filename
-
 	audioFormat := audio.DetectAudioFormat(contentType, filename)
-	h.log.Debug("Detected audio format", "content_type", contentType, "filename", filename, "format", audioFormat)
 
-	h.log.Debug(
-		"Uploading voice message",
+	h.log.Debug("audio file parsed",
 		"sender_id", senderID,
 		"room_id", roomID,
-		"duration", duration,
 		"size_bytes", len(data),
 		"format", audioFormat,
-	)
+		"filename", filename)
 
-	// Create message record (to get ID for S3 key)
+	// Create message record
 	message := &VoiceMessage{
+		ID:              uuid.New(),
 		RoomID:          roomID,
 		SenderID:        senderID,
 		DurationSeconds: duration,
 	}
-	// Generate ID for S3 upload
-	message.ID = uuid.New()
 
 	// Upload to S3
 	s3Key, err := h.fileStore.UploadVoiceMessage(ctx, message.ID, data, audioFormat)
 	if err != nil {
-		writeJson(w, http.StatusInternalServerError, "Failed to upload audio file")
-		h.log.Error("Failed to upload to S3", "error", err)
-		return
+		h.log.Error("failed to upload voice message to S3",
+			"message_id", message.ID,
+			"sender_id", senderID,
+			"room_id", roomID,
+			"error", err)
+		return httputil.Internal(err)
 	}
 
 	message.S3Key = s3Key
 
 	// Save to database
 	if err := h.dbStore.CreateVoiceMessage(ctx, message); err != nil {
-		// Try to clean up S3 file if DB insert fails
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second*3)
+		h.log.Error("failed to create voice message in database",
+			"message_id", message.ID,
+			"sender_id", senderID,
+			"room_id", roomID,
+			"s3_key", s3Key,
+			"error", err)
+
+		// Cleanup S3 file
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cleanupCancel()
-		_ = h.fileStore.DeleteVoiceMessage(cleanupCtx, s3Key)
+		if cleanupErr := h.fileStore.DeleteVoiceMessage(cleanupCtx, s3Key); cleanupErr != nil {
+			h.log.Error("failed to cleanup S3 after database error",
+				"s3_key", s3Key,
+				"error", cleanupErr)
+		}
 
-		writeJson(w, http.StatusInternalServerError, "Failed to save message metadata")
-
-		h.log.Error("Failed to create voice message in DB", "error", err)
-
-		return
+		return httputil.Internal(err)
 	}
 
-	// Generate presigned URL for immediate playback
+	// Generate presigned URL
 	url, err := h.fileStore.GetPresignedURL(ctx, s3Key, urlExpiryTime)
 	if err != nil {
-		h.log.Warn("Failed to generate presigned URL", "error", err)
-		url = "" // Continue without URL
+		h.log.Warn("failed to generate presigned URL, continuing without it",
+			"message_id", message.ID,
+			"s3_key", s3Key,
+			"error", err)
+		url = ""
 	}
+
+	// Broadcast websocket event
+	event := websocket.ServerMessage{
+		Type: websocket.TypeNewVoiceMessage,
+		Data: websocket.VoiceMessageData{
+			MessageID: message.ID,
+			SenderID:  message.SenderID,
+			Duration:  message.DurationSeconds,
+			URL:       url,
+		},
+	}
+	h.wsManager.BroadcastToRoom(message.RoomID, event)
+
+	h.log.Info("voice message uploaded successfully",
+		"message_id", message.ID,
+		"sender_id", senderID,
+		"room_id", roomID,
+		"duration_seconds", duration,
+		"size_bytes", len(data))
 
 	response := UploadVoiceMessageResponse{
 		Message: *message,
 		URL:     url,
 	}
 
-	h.log.Debug(
-		"Voice message uploaded",
-		"message_id", message.ID,
-		"room_id", roomID,
-		"s3_key", s3Key,
-	)
-
-	event := websocket.Event{
-		Type: websocket.EventNewVoiceMessage,
-		Data: websocket.NewVoiceMessageEvent{
-			MessageID: message.ID,
-			RoomID:    message.RoomID,
-			SenderID:  message.SenderID,
-			Duration:  message.DurationSeconds,
-			URL:       url,
-			CreatedAt: message.CreatedAt.Unix(),
-		},
-	}
-
-	h.wsManager.BroadcastToRoom(message.RoomID, event)
-
-	h.log.Debug("Broadcasted new voice message", "message_id", message.ID, "room_id", message.RoomID)
-
-	writeJson(w, http.StatusCreated, response)
+	return httputil.RespondJSON(w, http.StatusCreated, response)
 }
 
 // HandleGetRoomMessages retrieves all voice messages in a room
-func (h *Handler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
 	roomID, err := uuid.Parse(chi.URLParam(r, "roomID"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid room ID")
-		return
+		return httputil.BadRequest("Invalid room ID")
 	}
 
 	// Parse pagination params
@@ -243,7 +251,7 @@ func (h *Handler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) 
 		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
 			limit = parsedLimit
 			if limit > 100 {
-				limit = 100 // Cap at 100
+				limit = 100
 			}
 		}
 	}
@@ -254,21 +262,37 @@ func (h *Handler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*5)
+	h.log.Debug("get room messages request",
+		"user_id", userID,
+		"room_id", roomID,
+		"limit", limit,
+		"offset", offset)
+
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Verify user is in the room
 	isInRoom, err := h.roomStore.IsUserInRoom(ctx, roomID, userID)
-	if err != nil || !isInRoom {
-		writeError(w, http.StatusForbidden, "You are not a member of this room")
-		return
+	if err != nil {
+		h.log.Error("failed to verify room membership",
+			"user_id", userID,
+			"room_id", roomID,
+			"error", err)
+		return httputil.Internal(err)
+	}
+	if !isInRoom {
+		h.log.Warn("get room messages blocked - user not in room",
+			"user_id", userID,
+			"room_id", roomID)
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	messages, err := h.dbStore.GetRoomMessages(ctx, roomID, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to retrieve messages")
-		h.log.Error("Failed to get room messages", "room_id", roomID, "error", err)
-		return
+		h.log.Error("failed to get room messages from database",
+			"room_id", roomID,
+			"error", err)
+		return httputil.Internal(err)
 	}
 
 	// Generate presigned URLs for each message
@@ -276,7 +300,10 @@ func (h *Handler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) 
 	for _, msg := range messages {
 		url, err := h.fileStore.GetPresignedURL(ctx, msg.S3Key, urlExpiryTime)
 		if err != nil {
-			h.log.Warn("Failed to generate presigned URL", "message_id", msg.ID, "error", err)
+			h.log.Warn("failed to generate presigned URL for message",
+				"message_id", msg.ID,
+				"s3_key", msg.S3Key,
+				"error", err)
 			url = ""
 		}
 
@@ -286,45 +313,65 @@ func (h *Handler) HandleGetRoomMessages(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
+	h.log.Debug("room messages retrieved",
+		"room_id", roomID,
+		"count", len(messages))
+
 	response := GetRoomMessagesResponse{
 		Messages: messagesWithURLs,
 		Count:    len(messagesWithURLs),
 	}
 
-	h.log.Debug("Retrieved room messages", "room_id", roomID, "count", len(messages))
-
-	writeJson(w, http.StatusOK, response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
 // HandleGetVoiceMessage retrieves a single voice message
-func (h *Handler) HandleGetVoiceMessage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGetVoiceMessage(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
 	messageID, err := uuid.Parse(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid message ID")
-		return
+		return httputil.BadRequest("Invalid message ID")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*3)
+	h.log.Debug("get voice message request",
+		"user_id", userID,
+		"message_id", messageID)
+
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	message, err := h.dbStore.GetVoiceMessageByID(ctx, messageID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "Message not found")
-		return
+		h.log.Debug("voice message not found",
+			"message_id", messageID,
+			"error", err)
+		return httputil.NotFound("Message not found")
 	}
 
 	// Verify user is in the room
 	isInRoom, err := h.roomStore.IsUserInRoom(ctx, message.RoomID, userID)
-	if err != nil || !isInRoom {
-		writeError(w, http.StatusForbidden, "You are not a member of this room")
-		return
+	if err != nil {
+		h.log.Error("failed to verify room membership",
+			"user_id", userID,
+			"room_id", message.RoomID,
+			"error", err)
+		return httputil.Internal(err)
+	}
+	if !isInRoom {
+		h.log.Warn("get voice message blocked - user not in room",
+			"user_id", userID,
+			"room_id", message.RoomID,
+			"message_id", messageID)
+		return httputil.Forbidden("You are not a member of this room")
 	}
 
 	// Generate presigned URL
 	url, err := h.fileStore.GetPresignedURL(ctx, message.S3Key, urlExpiryTime)
 	if err != nil {
-		h.log.Warn("Failed to generate presigned URL", "message_id", messageID, "error", err)
+		h.log.Warn("failed to generate presigned URL",
+			"message_id", messageID,
+			"s3_key", message.S3Key,
+			"error", err)
 		url = ""
 	}
 
@@ -333,49 +380,65 @@ func (h *Handler) HandleGetVoiceMessage(w http.ResponseWriter, r *http.Request) 
 		URL:          url,
 	}
 
-	writeJson(w, http.StatusOK, response)
+	return httputil.RespondJSON(w, http.StatusOK, response)
 }
 
 // HandleDeleteVoiceMessage deletes a voice message (only by sender)
-func (h *Handler) HandleDeleteVoiceMessage(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleDeleteVoiceMessage(w http.ResponseWriter, r *http.Request) error {
 	userID := auth.GetUserID(r.Context())
 	messageID, err := uuid.Parse(chi.URLParam(r, "messageID"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid message ID")
-		return
+		return httputil.BadRequest("Invalid message ID")
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Second*5)
+	h.log.Debug("delete voice message request",
+		"user_id", userID,
+		"message_id", messageID)
+
+	ctx, cancel := h.dbCtx(r)
 	defer cancel()
 
 	// Get the message
 	message, err := h.dbStore.GetVoiceMessageByID(ctx, messageID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "Message not found")
-		return
+		h.log.Debug("voice message not found for deletion",
+			"message_id", messageID,
+			"error", err)
+		return httputil.NotFound("Message not found")
 	}
 
 	// Only sender can delete their own messages
 	if message.SenderID != userID {
-		writeError(w, http.StatusForbidden, "You can only delete your messages")
-		return
+		h.log.Warn("delete voice message blocked - not message owner",
+			"user_id", userID,
+			"message_id", messageID,
+			"owner_id", message.SenderID)
+		return httputil.Forbidden("You can only delete your messages")
 	}
 
 	// Delete from S3 first
 	if err := h.fileStore.DeleteVoiceMessage(ctx, message.S3Key); err != nil {
-		h.log.Error("Failed to delete from S3", "s3_key", message.S3Key, "error", err)
+		h.log.Error("failed to delete voice message from S3",
+			"message_id", messageID,
+			"s3_key", message.S3Key,
+			"error", err)
 		// Continue to delete from DB anyway
 	}
 
 	// Delete from database
 	if err := h.dbStore.DeleteVoiceMessage(ctx, messageID); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete message"})
-		return
+		h.log.Error(
+			"failed to delete voice message from database",
+			"message_id", messageID,
+			"error", err)
+		return httputil.Internal(err)
 	}
 
-	h.log.Debug("Voice message deleted", "message_id", messageID, "by_user", userID)
+	h.log.Info(
+		"voice message deleted successfully",
+		"message_id", messageID,
+		"deleted_by", userID,
+		"room_id", message.RoomID)
 
-	writeJson(w, http.StatusOK, "Message deleted successfully")
+	return httputil.RespondJSON(w, http.StatusOK, "Message deleted successfully")
 }
