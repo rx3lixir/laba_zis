@@ -101,6 +101,7 @@ func main() {
 	// Creating websocket manager
 	wsManager := websocket.NewConnectionManager(log)
 
+	// Converting database timeout from config to actual time
 	dbTimeout := time.Duration(c.MainDBParams.Timeout) * time.Second
 
 	// Create Handlers
@@ -147,14 +148,23 @@ func main() {
 	case sig := <-shutdown:
 		log.Info("shutdown signal received", "signal", sig)
 
+		// Start graceful shutdown with timeout
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
+		// Shutdown websocket connections first
+		log.Info("shutting down websocket conections...")
+		wsManager.Shutdown()
+		log.Info("websocket connections closed")
+
+		// Shutdown HTTP server
+		log.Info("shutting down http server...")
 
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Error("graceful shutdown failed", "error", err)
 			os.Exit(1)
 		}
 
-		log.Info("server stopped")
+		log.Info("server stopped gracefully")
 	}
 }

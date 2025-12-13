@@ -3,6 +3,7 @@ package websocket
 import (
 	"encoding/json"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,14 +28,14 @@ type Hub struct {
 	// Shutdown signal
 	shutdown chan struct{}
 
-	// Metrics
+	// Metrics with atomic oprations for thread-safety
 	metrics *HubMetrics
 
 	log *slog.Logger
 }
 
 type HubMetrics struct {
-	ConnectedClients int
+	ConnectedClients int32
 	MessagesSent     int64
 	MessagesDropped  int64
 	LastActivity     time.Time
@@ -81,7 +82,9 @@ func (h *Hub) Run() {
 
 func (h *Hub) handleRegister(client *Client) {
 	h.clients[client] = true
-	h.metrics.ConnectedClients = len(h.clients)
+
+	// Update metrics atimically
+	atomic.StoreInt32(&h.metrics.ConnectedClients, int32(len(h.clients)))
 
 	h.log.Info("client registered",
 		"room_id", h.roomID,
@@ -108,7 +111,8 @@ func (h *Hub) handleUnregister(client *Client) {
 	if _, ok := h.clients[client]; ok {
 		delete(h.clients, client)
 		close(client.send) // Signal client to stop
-		h.metrics.ConnectedClients = len(h.clients)
+
+		atomic.StoreInt32(&h.metrics.ConnectedClients, int32(len(h.clients)))
 
 		h.log.Info("client unregistered",
 			"room_id", h.roomID,
@@ -135,14 +139,15 @@ func (h *Hub) handleBroadcast(message ServerMessage) {
 	for client := range h.clients {
 		select {
 		case client.send <- data:
-			h.metrics.MessagesSent++
+			// Success - increment sent counter atomically
+			atomic.AddInt64(&h.metrics.MessagesSent, 1)
 		default:
 			// Client is too slow, disconnect it
 			h.log.Warn("client buffer full, disconnecting",
 				"user_id", client.userID,
 				"room_id", h.roomID,
 			)
-			h.metrics.MessagesDropped++
+			atomic.AddInt64(&h.metrics.MessagesDropped, 1)
 			h.handleUnregister(client)
 		}
 	}
@@ -183,12 +188,25 @@ func (h *Hub) broadcastUserLeft(userID uuid.UUID) {
 	}
 }
 
+// Send is called from outside the hub goroutine, so it must be thread-safe
 func (h *Hub) Send(message ServerMessage) {
 	select {
 	case h.broadcast <- message:
+		// Successfully queued
 	default:
+		// Channel full - increment dropped counter atomically
 		h.log.Error("hub broadcast channel full", "room_id", h.roomID)
-		h.metrics.MessagesDropped++
+		atomic.AddInt64(&h.metrics.MessagesDropped, 1)
+	}
+}
+
+// GetMetricsSnapshot returns a thread-safe copy of current metrics
+func (h *Hub) GetMetricsSnapshot() HubMetrics {
+	return HubMetrics{
+		ConnectedClients: atomic.LoadInt32(&h.metrics.ConnectedClients),
+		MessagesSent:     atomic.LoadInt64(&h.metrics.MessagesSent),
+		MessagesDropped:  atomic.LoadInt64(&h.metrics.MessagesDropped),
+		LastActivity:     h.metrics.LastActivity, // Only read from hub goroutine
 	}
 }
 

@@ -68,15 +68,15 @@ func (c *Client) readPump() {
 			if websocket.IsUnexpectedCloseError(err,
 				websocket.CloseGoingAway,
 				websocket.CloseAbnormalClosure) {
-				c.log.Error("WebSocket error", "error", err, "user_id", c.userID)
+				c.log.Error("webSocket error", "error", err, "user_id", c.userID)
 			}
 			break
 		}
 		// Parse and handle client message
 		var clientMsg ClientMessage
 		if err := json.Unmarshal(message, &clientMsg); err != nil {
-			c.log.Warn("Invalid message format", "error", err, "user_id", c.userID)
-			c.sendError("Invalid message format")
+			c.log.Warn("invalid message format", "error", err, "user_id", c.userID)
+			c.sendError("invalid message format")
 			continue
 		}
 		c.handleClientMessage(clientMsg)
@@ -138,10 +138,10 @@ func (c *Client) handleClientMessage(msg ClientMessage) {
 
 	case TypeReadReceipt:
 		// Handle read receipts
-		c.log.Debug("Read receipt", "user_id", c.userID)
+		c.log.Debug("read receipt", "user_id", c.userID)
 
 	default:
-		c.log.Warn("Unknown message type", "type", msg.Type, "user_id", c.userID)
+		c.log.Warn("unknown message type", "type", msg.Type, "user_id", c.userID)
 	}
 }
 
