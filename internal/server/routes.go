@@ -38,7 +38,17 @@ func NewRouter(config RouterConfig) *chi.Mux {
 				"http://localhost:3000",
 				"https://localhost:3000",
 			},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowedHeaders: []string{
+				"Origin",
+				"Content-Type",
+				"Accept",
+				"Upgrade",    // Important for WebSocket handshake
+				"Connection", // Important for WebSocket handshake
+				"Sec-Websocket-Key",
+				"Sec-Websocket-Version",
+				"Sec-Websocket-Protocol", // If you use subprotocols
+			},
 			ExposedHeaders:   []string{"Link"},
 			AllowCredentials: true,
 			MaxAge:           300,

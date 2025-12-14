@@ -2,7 +2,6 @@ package voice
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -74,11 +73,14 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 
 	// Parse multipart form
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+
+	// Parse multipart form with a reasonable memory limit
+	// Only 10MB kept in memory, rest spills to temp files
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		h.log.Debug("failed to parse multipart form",
 			"sender_id", senderID,
 			"error", err)
-		return httputil.BadRequest("Invalid multipart form data")
+		return httputil.BadRequest("Invalid multipart form data or file too big")
 	}
 
 	// Extract and validate parameters
@@ -124,24 +126,19 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Get the audio file from form
-	fileHandler, fileHeader, err := r.FormFile("audio")
+	file, fileHeader, err := r.FormFile("audio")
 	if err != nil {
 		return httputil.BadRequest("Audio file is required")
 	}
-	defer fileHandler.Close()
+	defer file.Close()
 
-	// Read file data
-	data, err := io.ReadAll(fileHandler)
-	if err != nil {
-		h.log.Error("failed to read uploaded audio file",
-			"sender_id", senderID,
-			"room_id", roomID,
-			"error", err)
-		return httputil.Internal(err)
-	}
-
-	if len(data) == 0 {
+	// Get file size from header
+	fileSize := fileHeader.Size
+	if fileSize == 0 {
 		return httputil.BadRequest("Empty audio file")
+	}
+	if fileSize > maxUploadSize {
+		return httputil.BadRequest("File too large (max 5 MB)")
 	}
 
 	// Detect audio format
@@ -152,7 +149,7 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 	h.log.Debug("audio file parsed",
 		"sender_id", senderID,
 		"room_id", roomID,
-		"size_bytes", len(data),
+		"size_bytes", fileSize,
 		"format", audioFormat,
 		"filename", filename)
 
@@ -164,8 +161,14 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 		DurationSeconds: duration,
 	}
 
-	// Upload to S3
-	s3Key, err := h.fileStore.UploadVoiceMessage(ctx, message.ID, data, audioFormat)
+	// Streaming upload to S3. File reader streams directly to S3
+	s3Key, err := h.fileStore.UploadVoiceMessage(
+		ctx,
+		message.ID,
+		file,
+		fileSize,
+		audioFormat,
+	)
 	if err != nil {
 		h.log.Error("failed to upload voice message to S3",
 			"message_id", message.ID,
@@ -225,7 +228,7 @@ func (h *Handler) HandleUploadVoiceMessage(w http.ResponseWriter, r *http.Reques
 		"sender_id", senderID,
 		"room_id", roomID,
 		"duration_seconds", duration,
-		"size_bytes", len(data))
+		"size_bytes", fileSize)
 
 	response := UploadVoiceMessageResponse{
 		Message: *message,

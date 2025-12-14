@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,7 +10,7 @@ import (
 
 // VoiceMessageStore handles S3 operations for voice files
 type VoiceMessageStore interface {
-	UploadVoiceMessage(ctx context.Context, messageID uuid.UUID, data []byte, audioFormat string) (string, error)
+	UploadVoiceMessage(ctx context.Context, messageID uuid.UUID, reader io.Reader, size int64, audioFormat string) (string, error)
 	DownloadVoiceMessage(ctx context.Context, objectName string) ([]byte, error)
 	DeleteVoiceMessage(ctx context.Context, objectName string) error
 	GetPresignedURL(ctx context.Context, objectName string, expiry time.Duration) (string, error)

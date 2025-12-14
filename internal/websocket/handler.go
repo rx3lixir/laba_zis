@@ -4,10 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/rx3lixir/laba_zis/internal/auth"
 	"github.com/rx3lixir/laba_zis/internal/room"
 	"github.com/rx3lixir/laba_zis/pkg/httputil"
@@ -40,20 +40,19 @@ func (h *Handler) dbCtx(r *http.Request) (context.Context, context.CancelFunc) {
 }
 
 func (h *Handler) HandleConnection(w http.ResponseWriter, r *http.Request) error {
-	roomID, err := httputil.ParseUUID(r, "room_id")
+	query := r.URL.Query()
+
+	roomIDstr := query.Get("room_id")
+	if roomIDstr == "" {
+		return httputil.BadRequest("room_id is missing in query param")
+	}
+
+	roomID, err := uuid.Parse(roomIDstr)
 	if err != nil {
-		return err
+		return httputil.BadRequest("Invalid room_id format")
 	}
 
-	token := r.Header.Get("Authorization")
-	if token != "" {
-		token = strings.TrimPrefix(token, "Bearer ")
-	}
-
-	if token == "" || token == r.Header.Get("Authorization") {
-		token = r.URL.Query().Get("token")
-	}
-
+	token := query.Get("token")
 	if token == "" {
 		return httputil.Unauthorized("Missing authorization token")
 	}

@@ -1,7 +1,6 @@
 package voice
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -23,34 +22,45 @@ func NewMinIOVoiceStore(client *minio.Client, bucketName string) *MinIOVoiceStor
 	}
 }
 
+// generateObjectName creates a consistent S3 key for voice messages
+func (m *MinIOVoiceStore) generateObjectName(messageID uuid.UUID, audioFormat string) string {
+	now := time.Now()
+
+	// FIXED: Your original code had day/month swapped!
+	return fmt.Sprintf(
+		"messages/%d/%02d/%02d/%s.%s",
+		now.Year(),
+		now.Month(),
+		now.Day(),
+		messageID.String(),
+		audioFormat,
+	)
+}
+
 // UploadVoiceMessage uplads a voice message to MinIO
 func (m *MinIOVoiceStore) UploadVoiceMessage(
 	ctx context.Context,
 	messageID uuid.UUID,
-	data []byte,
+	reader io.Reader,
+	size int64,
 	audioFormat string,
 ) (string, error) {
-	now := time.Now()
+	objectName := m.generateObjectName(messageID, audioFormat)
 
-	objectName := fmt.Sprintf(
-		"messages/%d/%02d/%02d/%s.%s",
-		now.Year(),
-		now.Day(),
-		now.Month(),
-		messageID.String(),
-		audioFormat,
-	)
-
-	reader := bytes.NewReader(data)
+	contentType := getContentType(audioFormat)
 
 	_, err := m.client.PutObject(
 		ctx,
 		m.bucketName,
 		objectName,
 		reader,
-		int64(len(data)),
+		size,
 		minio.PutObjectOptions{
-			ContentType: audioFormat,
+			ContentType: contentType,
+			UserMetadata: map[string]string{
+				"message-id": messageID.String(),
+				"uploaded":   time.Now().Format(time.RFC3339),
+			},
 		},
 	)
 	if err != nil {
@@ -101,4 +111,22 @@ func (m *MinIOVoiceStore) GetObjectInfo(ctx context.Context, objectName string) 
 		return nil, fmt.Errorf("failed to get object info: %w", err)
 	}
 	return &info, nil
+}
+
+// getContentType maps audio format to MIME type
+func getContentType(audioFormat string) string {
+	switch audioFormat {
+	case "webm":
+		return "audio/webm"
+	case "m4a", "mp4":
+		return "audio/mp4"
+	case "mp3":
+		return "audio/mpeg"
+	case "ogg", "opus":
+		return "audio/ogg"
+	case "wav":
+		return "audio/wav"
+	default:
+		return "application/octet-stream"
+	}
 }
